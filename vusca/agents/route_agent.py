@@ -216,6 +216,20 @@ GLOBAL_HUBS: Dict[str, Dict[str, str]] = {
         "airline": "Avianca / Air Europa",
         "description": "Ciudad amurallada colonial, arquitectura de cuento y playas caribeñas de las Islas del Rosario.",
     },
+    "CMN": {
+        "name": "Casablanca",
+        "country": "Marruecos",
+        "corridors": ["EUROPE_LATAM", "EUROPE_AMERICA", "EUROPE_AFRICA"],
+        "airline": "Royal Air Maroc",
+        "description": "Hub atlántico con tarifas históricamente competitivas hacia Brasil (São Paulo) y programa de escala.",
+    },
+    "OPO": {
+        "name": "Oporto",
+        "country": "Portugal",
+        "corridors": ["EUROPE_LATAM", "EUROPE_AMERICA"],
+        "airline": "TAP Air Portugal",
+        "description": "Riberas del Duero, bodegas de vino y conexión directa de TAP hacia Brasil con stopover gratuito.",
+    },
 }
 
 HUB_PRESETS: Dict[str, List[str]] = {
@@ -225,6 +239,9 @@ HUB_PRESETS: Dict[str, List[str]] = {
     "europe": ["IST", "HEL", "FRA", "MUC", "CDG", "AMS", "FCO", "ZRH"],
     "all_asia": ["BKK", "SIN", "KUL", "ICN", "TPE", "HKG", "DOH", "DXB", "AUH", "IST"],
     "istanbul": ["IST"],
+    "brasil": ["LIS", "CMN", "FCO"],
+    "brazil": ["LIS", "CMN", "FCO"],
+    "latam_top": ["LIS", "CMN", "BOG", "PTY"],
 }
 
 
@@ -310,11 +327,14 @@ class RouteAgent:
         # Heuristic corridor matching
         corridor = "EUROPE_ASIA"
         # Check if origin or dest is in Americas, Europe, Asia, etc.
-        americas = {"JFK", "MIA", "BOG", "EZE", "MEX"}
+        americas = {"JFK", "MIA", "BOG", "EZE", "MEX", "GRU", "GIG", "SSA", "REC", "FOR", "BSB", "CNF"}
+        brazil = {"GRU", "GIG", "SSA", "REC", "FOR", "BSB", "CNF", "FLN"}
         asia = {"TYO", "NRT", "HND", "OSA", "KIX", "NGO", "FUK", "BKK", "SIN", "KUL", "DPS", "ICN", "TPE"}
         europe = {"MAD", "BCN", "BIO", "VLC", "AGP", "LIS", "CDG", "FCO", "LHR", "AMS", "FRA", "MUC", "ATH", "VIE"}
 
-        if origin in europe and destination in asia:
+        if (origin in europe and destination in brazil) or (destination in brazil):
+            corridor = "EUROPE_LATAM"
+        elif origin in europe and destination in asia:
             corridor = "EUROPE_ASIA"
         elif origin in europe and destination in americas:
             corridor = "EUROPE_AMERICA"

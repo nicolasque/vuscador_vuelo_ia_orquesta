@@ -170,5 +170,5 @@ def test_synthesis_agent_multi_origin_report_with_links():
     assert "Estrategia de Hubs y Paradas Intermedias" in report
     assert "Las 4 Mejores Opciones desde Madrid (MAD)" in report
     assert "Las 4 Mejores Opciones desde Bilbao (BIO)" in report
-    assert "https://www.google.com/travel/flights?q=flights+from+MAD+to+SDQ" in report
+    assert "https://www.google.com/travel/flights?q=one-way+flights+from+MAD+to+SDQ" in report
     assert "Shinkansen" not in report  # Verified: no hardcoded Japan text for Colombia

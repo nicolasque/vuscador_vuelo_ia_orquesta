@@ -251,3 +251,39 @@ def test_assemble_itineraries_max_stops_per_leg_and_direction():
     assert chosen_mad_bkk.price_eur == 200.0
 
 
+def test_combinator_with_mixed_origin_and_return_cities():
+    window = PTOWindow(
+        start_date=date(2027, 3, 5),
+        end_date=date(2027, 3, 28),
+        total_days=23,
+        work_days_needed=14,
+        weekend_days=4,
+        holiday_days=2,
+        efficiency_ratio=1.64,
+    )
+
+    combinator = RouteCombinator(
+        origins=["MAD", "BIO"],
+        destinations=["KUL"],
+        return_destinations=["KUL", "SIN"],
+        return_arrivals=["MAD", "BIO"],
+        candidate_windows=[window],
+        candidate_stopovers=["IST"],
+        min_stopover_days=2,
+        max_stopover_days=2,
+        include_dual_stopovers=False,
+    )
+
+    blueprints, tasks = combinator.generate_blueprints()
+
+    mad_to_bio = [b for b in blueprints if b.origin == "MAD" and b.leg_keys[-1][1] == "BIO"]
+    bio_to_mad = [b for b in blueprints if b.origin == "BIO" and b.leg_keys[-1][1] == "MAD"]
+    mad_to_mad = [b for b in blueprints if b.origin == "MAD" and b.leg_keys[-1][1] == "MAD"]
+    bio_to_bio = [b for b in blueprints if b.origin == "BIO" and b.leg_keys[-1][1] == "BIO"]
+
+    assert len(mad_to_bio) > 0, "Should generate MAD -> ... -> BIO mixed routes"
+    assert len(bio_to_mad) > 0, "Should generate BIO -> ... -> MAD mixed routes"
+    assert len(mad_to_mad) > 0, "Should generate standard MAD -> ... -> MAD routes"
+    assert len(bio_to_bio) > 0, "Should generate standard BIO -> ... -> BIO routes"
+
+

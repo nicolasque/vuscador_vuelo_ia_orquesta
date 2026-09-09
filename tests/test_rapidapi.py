@@ -52,7 +52,7 @@ def test_rapidapi_provider_parse():
         }
     }
 
-    with patch("requests.get") as mock_get:
+    with patch.object(provider.session, "get") as mock_get:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = mock_response_data

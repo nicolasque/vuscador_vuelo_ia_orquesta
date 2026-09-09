@@ -229,3 +229,64 @@ Antes de tocar código o lanzar búsquedas masivas, comprueba que todos los test
    - Por ejemplo, no mencionar el tren Shinkansen o Japón cuando la búsqueda sea a Colombia o Tailandia. Utilizar los métodos contextuales de `RouteAgent` (`get_open_jaw_strategy`).
 6. **Mantener la Suite de Tests al 100%:**
    - Cualquier cambio en modelos, agentes o combinatoria debe verificarse con `pytest`. Si se añaden capacidades nuevas, debe añadirse un test en `tests/`.
+
+---
+
+## 📐 6. Estándar Obligatorio de Salida para Agentes de IA (Mandatory Flight Search Output Standard)
+
+> **REGLA ABSOLUTA PARA CUALQUIER AGENTE:** Toda búsqueda o respuesta que presente vuelos a los usuarios en este repositorio **DEBE SEGUIR OBLIGATORIAMENTE** esta estructura visual. No comprimir la salida ni eliminar viñetas, saltos de línea ni enlaces.
+
+### 6.1. Requisitos Técnicos Obligatorios
+1. **URLs de Vuelo Siempre de Solo Ida (One-Way Only):**
+   - El parámetro `q` de Google Flights **debe incluir siempre `one-way+flights+from+...`**:
+     `https://www.google.com/travel/flights?q=one-way+flights+from+{ORIG}+to+{DEST}+on+{YYYY-MM-DD}`
+   - **NUNCA** usar `flights+from+...` a secas, ya que Google Flights interpretaría un vuelo de ida y vuelta e inventaría una fecha de retorno errónea.
+2. **Lanzador de Pestañas Múltiples (Multi-Tab Opener):**
+   - Cada tarjeta de itinerario debe incluir el enlace al lanzador universal [`open_tabs.html`](file:///Users/nicolas/Documents/42/vusca_vuelos_orquesta/open_tabs.html):
+     `- **Abrir Todos los Tramos:** [🚀 Abrir las N pestañas a la vez en Google Flights (Solo Ida)](file:///Users/nicolas/Documents/42/vusca_vuelos_orquesta/open_tabs.html#title=...&urls=...)`
+   - Permite al viajero abrir todos los billetes independientes del viaje en pestañas separadas con un solo clic sin bloqueos de navegador.
+3. **Espaciado y División Visual:**
+   - Separar cada opción con divisores horizontales `---` y saltos de línea generosos para evitar texto apelotonado.
+   - Resaltar la ruta completa dentro de bloques de código en línea (\` \`).
+   - Resaltar siempre precios en negrita (`**XX,XX €**`) y aerolíneas en cursiva (`*Iberia*`).
+   - Sub-lista numerada con sangría de 2 espacios para el desglose de tramos.
+
+### 6.2. Plantilla Maestra de Salida (Template)
+
+```markdown
+# ✈️ Informe de Búsqueda Inteligente: [Orígenes] ➔ [Destinos]
+
+## 🎯 Configuración y Justificación de la Búsqueda (Por Qué se Buscó de Esta Manera)
+### 📅 1. Estrategia de Calendario y Festivos (PTO)
+### 🌍 2. Estrategia de Hubs y Paradas Intermedias (Stopovers)
+### 🔄 3. Estrategia Multiciudad (Open-Jaw)
+### 🛑 4. Reglas de Confort y Poda Algorítmica
+
+## 📊 Cuadro Ampliado de Posibilidades (Comparativa de Opciones)
+### 🇪🇸 Opciones desde [Origen] ([IATA])
+| # | Ruta y Paradas | Fechas | Días Viaje | Días Vacaciones | Precio Total | Puntuación IA |
+|---|----------------|:------:|:----------:|:---------------:|:------------:|:-------------:|
+| 1 | ... | ... | ... | ... | **XXX,XX €** | **XX.X**/100 |
+
+## 🏆 Desglose Detallado de las Mejores Opciones
+### 🇪🇸 Las 4 Mejores Opciones desde [Origen] ([IATA])
+
+### 🥇 Opción 1: [Nombre Atractivo de la Ruta]
+
+- **Precio Total: XXX,XX €**
+- **Duración:** N días (DD/MM/AAAA al DD/MM/AAAA) | **Vacaciones requeridas: X días**
+- **Ruta:** `ORIGEN ➔ Hub (X días) ➔ DESTINO | Regreso Open-Jaw: DESTINO2 ➔ Hub2 (X días) ➔ ORIGEN`
+- **Desglose de Vuelos:**
+  1. **DD/MM/AAAA:** [ORIG ➔ DEST](https://www.google.com/travel/flights?q=one-way+flights+from+ORIG+to+DEST+on+YYYY-MM-DD) por **XX,XX €** | *Aerolínea* (Detalle de escalas técnicas).
+  2. **DD/MM/AAAA:** [ORIG ➔ DEST](https://www.google.com/travel/flights?q=one-way+flights+from+ORIG+to+DEST+on+YYYY-MM-DD) por **XX,XX €** | *Aerolínea* (Vuelo **DIRECTO** sin escalas).
+- **Abrir Todos los Tramos:** [🚀 Abrir las N pestañas a la vez en Google Flights (Solo Ida)](file:///Users/nicolas/Documents/42/vusca_vuelos_orquesta/open_tabs.html#title=...&urls=...)
+- **Escalas:** Ida = X escalas (detalle) | Vuelta = X escalas (detalle).
+- **Ventaja:** [Explicación del valor añadido: Open-Jaw, ahorro de billetes internos, descanso en stopovers, etc.]
+
+---
+[Repetir para 🥈 Opción 2, 🥉 Opción 3, 🏅 Opción 4]
+
+## 🔄 Comparativa de Ciudades de Regreso (Multiciudad / Open-Jaw)
+## 💡 Consejos Logísticos para las Escalas Intermedias (Stopovers)
+```
+

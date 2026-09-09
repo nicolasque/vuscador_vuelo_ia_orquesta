@@ -3,8 +3,8 @@
 import argparse
 import sys
 import uuid
-from datetime import date, datetime
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Optional, List
 
 from rich.console import Console
 from rich.table import Table
@@ -34,6 +34,40 @@ def print_banner():
     console.print(Panel(banner_text, border_style="cyan", expand=False))
 
 
+def create_progress_logger(progress: Progress, p_task, title: str = "Consultando tramos"):
+    """Creates a callback that logs each completed atomic search leg into the console above the progress bar."""
+    def on_progress(task_item, current, total):
+        pct = (current * 100.0 / total) if total else 100.0
+        price_info = f" (desde [bold yellow]{task_item.min_price_eur:.0f} €[/bold yellow])" if task_item.min_price_eur is not None else ""
+        dur_info = f" [dim]({task_item.elapsed_seconds}s)[/dim]" if task_item.elapsed_seconds is not None else ""
+
+        if task_item.status == "CACHED":
+            tag = "[bold blue]💾 BD LOCAL[/bold blue]"
+            detail = f"[blue]{task_item.results_count} ofertas[/blue]{price_info}"
+        elif task_item.status == "SUCCESS":
+            provider_label = task_item.provider_name or "API"
+            tag = f"[bold green]🌐 API {provider_label}[/bold green]"
+            detail = f"[green]{task_item.results_count} ofertas recibidas[/green]{price_info}"
+        else:
+            tag = "[bold red]❌ FALLO API[/bold red]"
+            err = task_item.error_message or "Sin vuelos disponibles"
+            if len(err) > 60:
+                err = err[:57] + "..."
+            detail = f"[red]{err}[/red]"
+
+        progress.console.print(
+            f"[dim][{current:03d}/{total:03d} {pct:3.0f}%][/dim] {tag} ➔ "
+            f"[bold cyan]{task_item.origin} ➔ {task_item.destination}[/bold cyan] "
+            f"[white]({task_item.travel_date})[/white] | {detail}{dur_info}"
+        )
+        progress.update(
+            p_task,
+            completed=current,
+            description=f"[cyan]{title} ({current}/{total})...[/cyan]",
+        )
+    return on_progress
+
+
 def run_search_flow(
     origin: Optional[str] = None,
     destination: Optional[str] = None,
@@ -41,18 +75,27 @@ def run_search_flow(
     destinations: Optional[List[str]] = None,
     max_pto_days: int = 5,
     month_str: Optional[str] = None,
+    year: Optional[int] = None,
+    start_date_str: Optional[str] = None,
+    end_date_str: Optional[str] = None,
+    event: Optional[str] = None,
     country: str = "ES",
     subdivision: Optional[str] = "MD",
     provider_name: Optional[str] = None,
     return_destinations: Optional[List[str]] = None,
+    return_arrivals: Optional[List[str]] = None,
+    mix_origins: bool = False,
     min_stopover_days: int = 1,
     max_stopover_days: int = 3,
     min_trip_days: int = 5,
-    max_trip_days: int = 24,
+    max_trip_days: int = 25,
     stopovers: Optional[List[str]] = None,
     stopover_preset: Optional[str] = None,
     outbound_stopovers: Optional[List[str]] = None,
     return_stopovers: Optional[List[str]] = None,
+    include_dual_stopovers: bool = False,
+    priority: str = "balanced",
+    top_k_windows: int = 4,
     max_scales: int = 2,
     max_stops_per_leg: int = 1,
     date_flexibility: int = 0,
@@ -61,24 +104,58 @@ def run_search_flow(
 ):
     print_banner()
 
-    # Determine date search range from target month
-    if month_str:
+    today = date.today()
+    target_year = year or (datetime.strptime(month_str, "%Y-%m").year if (month_str and "-" in month_str) else today.year)
+
+    # 1. Resolve date search range from explicit dates, preconfigured events, or month/year
+    if start_date_str and end_date_str:
         try:
-            target_dt = datetime.strptime(month_str, "%Y-%m")
-            year = target_dt.year
-            month = target_dt.month
-            start_date = date(year, month, 1)
-            # End of month
-            if month == 12:
-                end_date = date(year, 12, 31)
-            else:
-                end_date = date(year, month + 1, 1) - date.resolution
+            start_date = datetime.strptime(start_date_str.strip(), "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date_str.strip(), "%Y-%m-%d").date()
         except ValueError:
-            console.print("[red]Error: El formato de mes debe ser AAAA-MM (ej. 2026-10)[/red]")
+            console.print("[red]Error: El formato de fecha debe ser AAAA-MM-DD (ej. 2027-03-15)[/red]")
             return
+    elif event:
+        ev = event.lower().replace("_", "-")
+        if ev in ("semana-santa", "easter", "semanasanta", "pascua"):
+            start_date = date(target_year, 3, 1)
+            end_date = date(target_year, 4, 30)
+        elif ev in ("puente-mayo", "mayo"):
+            start_date = date(target_year, 4, 25)
+            end_date = date(target_year, 5, 31)
+        elif ev in ("verano", "agosto"):
+            start_date = date(target_year, 7, 1)
+            end_date = date(target_year, 8, 31)
+        elif ev in ("pilar", "octubre"):
+            start_date = date(target_year, 10, 1)
+            end_date = date(target_year, 10, 31)
+        elif ev in ("navidad", "fin-de-ano"):
+            start_date = date(target_year, 12, 15)
+            end_date = date(target_year + 1, 1, 15)
+        else:
+            start_date = date(target_year, 1, 1)
+            end_date = date(target_year, 12, 31)
+    elif month_str:
+        try:
+            if "-" in month_str:
+                target_dt = datetime.strptime(month_str, "%Y-%m")
+                m_year = target_dt.year
+                m_month = target_dt.month
+            else:
+                m_year = target_year
+                m_month = int(month_str)
+            start_date = date(m_year, m_month, 1)
+            # Allow return trips that extend into the following month for long journeys
+            lead_days = max(max_trip_days, 30)
+            end_date = start_date + timedelta(days=31 + lead_days)
+        except ValueError:
+            console.print("[red]Error: El formato de mes debe ser AAAA-MM (ej. 2027-03) o el número de mes (1-12)[/red]")
+            return
+    elif year:
+        start_date = date(year, 1, 1)
+        end_date = date(year, 12, 31)
     else:
-        # Default next month or current month
-        today = date.today()
+        # Default next month to end of year
         start_date = date(today.year, today.month, 1)
         end_date = date(today.year, 12, 31)
 
@@ -112,6 +189,8 @@ def run_search_flow(
         f"• Rango de Salida: [bold]{start_date}[/bold] al [bold]{end_date}[/bold]\n"
         f"• Duración de Viaje Deseada: [bold]{min_trip_days}[/bold] a [bold]{max_trip_days}[/bold] días\n"
         f"• Máximo días de vacaciones (PTO): [bold]{max_pto_days}[/bold] días\n"
+        f"• Doble Escala Turística (Dual Stopover): [bold]{'ACTIVADA' if include_dual_stopovers else 'Desactivada'}[/bold]\n"
+        f"• Prioridad de Búsqueda: [bold]{priority.upper()}[/bold]\n"
         f"• Escalas Máximas por Trayecto: [bold]{max_scales}[/bold] (incluyendo escala principal)\n"
         f"• Flexibilidad de Fechas: [bold]±{date_flexibility} días[/bold]\n"
         f"• Proveedor de vuelos: [bold]{provider.name}[/bold]\n"
@@ -128,7 +207,7 @@ def run_search_flow(
             max_pto_days=max_pto_days,
             min_total_days=min_trip_days,
             max_total_days=max_trip_days,
-            top_k=3,
+            top_k=top_k_windows,
         )
 
     if date_flexibility > 0 and optimal_windows:
@@ -244,16 +323,20 @@ def run_search_flow(
         "TYO": "Tokio", "NRT": "Tokio Narita", "HND": "Tokio Haneda",
         "KIX": "Osaka Kansai", "OSA": "Osaka", "ITM": "Osaka Itami",
         "MAD": "Madrid", "BCN": "Barcelona", "BIO": "Bilbao", "BKK": "Bangkok",
-        "SIN": "Singapur", "ICN": "Seúl", "TPE": "Taipéi",
+        "SIN": "Singapur", "ICN": "Seúl", "TPE": "Taipéi", "KUL": "Kuala Lumpur",
         "HKG": "Hong Kong", "DOH": "Doha", "DXB": "Dubái",
         "IST": "Estambul", "AUH": "Abu Dhabi",
         "BOG": "Bogotá", "MDE": "Medellín", "CTG": "Cartagena",
         "PTY": "Ciudad de Panamá", "CUN": "Cancún", "SDQ": "Santo Domingo",
-        "LIS": "Lisboa", "MIA": "Miami",
+        "LIS": "Lisboa", "MIA": "Miami", "CMN": "Casablanca",
+        "GRU": "São Paulo", "GIG": "Río de Janeiro", "SSA": "Salvador de Bahía",
+        "PEN": "Penang", "SGN": "Ho Chi Minh", "HAN": "Hanói", "DPS": "Bali", "CAI": "El Cairo",
     }
     for k, v in known_names.items():
         if k not in stopover_names:
             stopover_names[k] = v
+
+    effective_return_arrivals = return_arrivals if return_arrivals is not None else (origins_list if mix_origins else None)
 
     with console.status("[bold blue]⚙️ [3/5] Motor Combinatorio generando permutaciones y podando tareas...[/bold blue]"):
         combinator = RouteCombinator(
@@ -265,8 +348,10 @@ def run_search_flow(
             return_stopovers=return_codes,
             stopover_names=stopover_names,
             return_destinations=ret_dest_list,
+            return_arrivals=effective_return_arrivals,
             min_stopover_days=min_stopover_days,
             max_stopover_days=max_stopover_days,
+            include_dual_stopovers=include_dual_stopovers,
         )
         blueprints, leg_tasks = combinator.generate_blueprints()
 
@@ -338,14 +423,7 @@ def run_search_flow(
         console=console,
     ) as progress:
         p_task = progress.add_task("[cyan]Consultando tramos...", total=len(leg_tasks))
-
-        def on_progress(task_item, current, total):
-            stat_color = "green" if task_item.status in ("SUCCESS", "CACHED") else "red"
-            progress.update(
-                p_task,
-                completed=current,
-                description=f"[{stat_color}][{task_item.status}][/{stat_color}] {task_item.origin} ➔ {task_item.destination} ({task_item.travel_date})",
-            )
+        on_progress = create_progress_logger(progress, p_task, title="Consultando tramos")
 
         itineraries = search_engine.execute_job(
             job=search_job,
@@ -355,19 +433,37 @@ def run_search_flow(
             max_stops_per_leg=max_stops_per_leg,
         )
 
-    console.print(f"[bold green]✓ Búsqueda completada con éxito.[/bold green] Se estructuraron {len(itineraries)} itinerarios completos.\n")
+    cached_count = sum(1 for t in search_job.tasks if t.status == "CACHED")
+    api_count = sum(1 for t in search_job.tasks if t.status == "SUCCESS")
+    failed_count = sum(1 for t in search_job.tasks if t.status == "FAILED")
+    total_offers = sum(t.results_count for t in search_job.tasks)
+    summary_parts = [f"[bold blue]💾 {cached_count} en BD local[/bold blue]", f"[bold green]🌐 {api_count} vía API[/bold green]"]
+    if failed_count:
+        summary_parts.append(f"[bold red]❌ {failed_count} fallidas[/bold red]")
+    console.print(
+        f"[bold green]✓ Fase de consultas finalizada:[/bold green] {' | '.join(summary_parts)} | "
+        f"[yellow]{total_offers:,} ofertas evaluadas[/yellow] ➔ "
+        f"[bold white]{len(itineraries)} itinerarios viables estructurados[/bold white].\n"
+    )
 
     # -------------------------------------------------------------
     # 5. Agente Sintetizador & Analista de IA
     # -------------------------------------------------------------
     with console.status("[bold green]🤖 [5/5] Agente Sintetizador de IA analizando y calificando resultados...[/bold green]"):
         synthesis_agent = SynthesisAgent()
-        ranked_itineraries = synthesis_agent.evaluate_and_rank(itineraries)
+        ranked_itineraries = synthesis_agent.evaluate_and_rank(itineraries, priority=priority)
+
+        # Filter strictly by min_trip_days if specified
+        if min_trip_days > 5:
+            ranked_itineraries = [it for it in ranked_itineraries if it.total_trip_days >= min_trip_days]
 
         search_context = {
+            "priority": priority,
             "origins": origins_list,
             "destinations": destinations_list,
             "return_destinations": ret_dest_list,
+            "return_arrivals": effective_return_arrivals,
+            "mix_origins": mix_origins,
             "candidate_windows": candidate_windows,
             "optimal_windows": optimal_windows,
             "candidate_stopovers": candidate_codes,
@@ -376,9 +472,12 @@ def run_search_flow(
             "hub_strategy": hub_rationale,
             "open_jaw_strategy": open_jaw_strategy,
             "constraints": {
+                "priority": priority,
                 "max_scales": max_scales,
                 "max_stops_per_leg": max_stops_per_leg,
                 "max_pto_days": max_pto_days,
+                "min_trip_days": min_trip_days,
+                "max_trip_days": max_trip_days,
                 "date_flexibility": date_flexibility,
             },
             "stats": {
@@ -388,8 +487,8 @@ def run_search_flow(
         }
 
         report_markdown = synthesis_agent.generate_final_report(
-            origin=origin,
-            destination=destination,
+            origin=origin or ", ".join(origins_list),
+            destination=destination or ", ".join(destinations_list),
             itineraries=ranked_itineraries,
             candidate_stopover_names=stopover_names,
             search_context=search_context,
@@ -403,7 +502,9 @@ def run_search_flow(
     console.print(Markdown(report_markdown))
 
     # Save to file if requested or by default
-    out_path = output_file or f"reporte_{origin}_{destination}_{job_id}.md"
+    orig_slug = "_".join(origins_list)
+    dest_slug = "_".join(destinations_list)
+    out_path = output_file or f"reporte_{orig_slug}_{dest_slug}_{job_id}.md"
     try:
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(report_markdown)
@@ -454,14 +555,7 @@ def resume_flow(job_id: str):
         console=console,
     ) as progress:
         p_task = progress.add_task("[cyan]Reanudando consultas...", total=len(job.tasks))
-
-        def on_progress(task_item, current, total):
-            stat_color = "green" if task_item.status in ("SUCCESS", "CACHED") else "red"
-            progress.update(
-                p_task,
-                completed=current,
-                description=f"[{stat_color}][{task_item.status}][/{stat_color}] {task_item.origin} ➔ {task_item.destination} ({task_item.travel_date})",
-            )
+        on_progress = create_progress_logger(progress, p_task, title="Reanudando consultas")
 
         itineraries = search_engine.execute_job(
             job=job,
@@ -469,7 +563,18 @@ def resume_flow(job_id: str):
             progress_callback=on_progress,
         )
 
-    console.print(f"[bold green]✓ Búsqueda finalizada con éxito.[/bold green]\n")
+    cached_count = sum(1 for t in job.tasks if t.status == "CACHED")
+    api_count = sum(1 for t in job.tasks if t.status == "SUCCESS")
+    failed_count = sum(1 for t in job.tasks if t.status == "FAILED")
+    total_offers = sum(t.results_count for t in job.tasks)
+    summary_parts = [f"[bold blue]💾 {cached_count} en BD local[/bold blue]", f"[bold green]🌐 {api_count} vía API[/bold green]"]
+    if failed_count:
+        summary_parts.append(f"[bold red]❌ {failed_count} fallidas[/bold red]")
+    console.print(
+        f"[bold green]✓ Búsqueda finalizada con éxito:[/bold green] {' | '.join(summary_parts)} | "
+        f"[yellow]{total_offers:,} ofertas evaluadas[/yellow] ➔ "
+        f"[bold white]{len(itineraries)} itinerarios viables estructurados[/bold white].\n"
+    )
 
     synthesis_agent = SynthesisAgent()
     ranked = synthesis_agent.evaluate_and_rank(itineraries)
@@ -543,29 +648,79 @@ def list_jobs_flow():
 
 def interactive_wizard():
     print_banner()
-    console.print("[bold cyan]🧙 Asistente Interactivo de Búsqueda de Vuelos[/bold cyan]\n")
+    console.print("[bold cyan]🧙 Asistente Interactivo de Búsqueda Avanzada de Vuelos[/bold cyan]\n")
 
-    origin = Prompt.ask("Aeropuerto de origen (IATA)", default="MAD").upper()
-    destination = Prompt.ask("Aeropuerto de destino final (IATA)", default="TYO").upper()
-    days_pto = IntPrompt.ask("Máximo de días de vacaciones de trabajo a gastar", default=5)
-    
+    origins_raw = Prompt.ask("Aeropuerto(s) de origen (separados por coma)", default="MAD, BIO").upper()
+    destinations_raw = Prompt.ask("Aeropuerto(s) de destino final (separados por coma)", default="KUL, SIN").upper()
+
+    origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
+    destinations = [d.strip() for d in destinations_raw.split(",") if d.strip()]
+
     current_year = date.today().year
-    month = Prompt.ask(
-        "Mes deseado para viajar (AAAA-MM)", default=f"{current_year}-10"
+    year_input = IntPrompt.ask("Año deseado para viajar", default=current_year + 1)
+
+    timing_type = Prompt.ask(
+        "Tipo de fechas",
+        choices=["evento", "mes", "fechas-exactas", "todo-el-ano"],
+        default="evento",
     )
-    country = Prompt.ask("País de tu trabajo (código ISO)", default="ES").upper()
-    subdivision = Prompt.ask("Comunidad/Región (opcional)", default="MD").upper()
+
+    event_val = None
+    month_val = None
+    start_val = None
+    end_val = None
+
+    if timing_type == "evento":
+        event_val = Prompt.ask(
+            "Selecciona el evento o festivo",
+            choices=["semana-santa", "puente-mayo", "verano", "pilar", "navidad"],
+            default="semana-santa",
+        )
+    elif timing_type == "mes":
+        month_val = Prompt.ask(
+            "Mes deseado (AAAA-MM o 1-12)",
+            default=f"{year_input}-03",
+        )
+    elif timing_type == "fechas-exactas":
+        start_val = Prompt.ask("Fecha de inicio (AAAA-MM-DD)", default=f"{year_input}-03-15")
+        end_val = Prompt.ask("Fecha de fin (AAAA-MM-DD)", default=f"{year_input}-04-11")
+
+    min_days = IntPrompt.ask("Duración mínima del viaje en días (ej. 10 para puente, 21 para gran viaje)", default=10)
+    max_days = IntPrompt.ask("Duración máxima del viaje en días", default=max(min_days + 4, 25))
+    days_pto = IntPrompt.ask(
+        "Máximo de días de vacaciones de trabajo a gastar (PTO)",
+        default=min(14, max(int(min_days * 0.6), 5)),
+    )
+
+    dual_stop = Prompt.ask("¿Permitir doble escala turística (ida y vuelta)?", choices=["s", "n"], default="s") == "s"
+
+    priority_val = Prompt.ask(
+        "Criterio de optimización",
+        choices=["balanced", "cheapest", "pto"],
+        default="balanced",
+    )
+
     provider_choice = Prompt.ask(
-        "Proveedor de vuelos", choices=["auto", "mock", "amadeus", "kiwi"], default="auto"
+        "Proveedor de vuelos",
+        choices=["auto", "google", "pool", "mock", "rapidapi", "amadeus"],
+        default="auto",
     )
 
     run_search_flow(
-        origin=origin,
-        destination=destination,
+        origins=origins,
+        destinations=destinations,
+        origin=origins[0],
+        destination=destinations[0],
+        year=year_input,
+        event=event_val,
+        month_str=month_val,
+        start_date_str=start_val,
+        end_date_str=end_val,
+        min_trip_days=min_days,
+        max_trip_days=max_days,
         max_pto_days=days_pto,
-        month_str=month,
-        country=country,
-        subdivision=subdivision,
+        include_dual_stopovers=dual_stop,
+        priority=priority_val,
         provider_name=provider_choice,
     )
 
@@ -577,30 +732,51 @@ def cli_entrypoint():
     subparsers = parser.add_subparsers(dest="command", help="Comando a ejecutar")
 
     # Command: search
-    search_parser = subparsers.add_parser("search", help="Ejecutar búsqueda de vuelos")
+    search_parser = subparsers.add_parser("search", help="Ejecutar búsqueda avanzada de vuelos")
     search_parser.add_argument("--origin", "-o", help="Código IATA de origen (ej. MAD)")
-    search_parser.add_argument("--origins", help="Códigos IATA de origen separados por coma (ej. MAD,BCN)")
-    search_parser.add_argument("--destination", "-d", help="Código IATA de destino (ej. TYO, BKK, JFK)")
-    search_parser.add_argument("--destinations", help="Códigos IATA de destino separados por coma (ej. TYO,OSA)")
-    search_parser.add_argument("--return-destinations", "-rd", help="Aeropuertos de regreso alternativos separados por coma (ej. TYO,KIX)")
+    search_parser.add_argument("--origins", help="Códigos IATA de origen separados por coma (ej. MAD,BIO)")
+    search_parser.add_argument("--destination", "-d", help="Código IATA de destino (ej. TYO, BKK, KUL)")
+    search_parser.add_argument("--destinations", help="Códigos IATA de destino separados por coma (ej. KUL,SIN)")
+    search_parser.add_argument("--return-destinations", "-rd", help="Aeropuertos de regreso alternativos separados por coma (ej. KUL,SIN)")
     search_parser.add_argument("--days-pto", "-p", type=int, default=5, help="Días máximos de vacaciones a gastar")
-    search_parser.add_argument("--trip-days", "-td", type=int, help="Duración deseada del viaje en días (ej. 20)")
-    search_parser.add_argument("--min-trip-days", type=int, default=5, help="Mínimo de días totales de viaje")
+    search_parser.add_argument("--trip-days", "-td", type=int, help="Duración deseada del viaje en días (ej. 21)")
+    search_parser.add_argument("--min-trip-days", type=int, default=5, help="Mínimo de días totales de viaje (ej. 21)")
     search_parser.add_argument("--max-trip-days", type=int, default=25, help="Máximo de días totales de viaje")
-    search_parser.add_argument("--month", "-m", help="Mes preferido (AAAA-MM, ej. 2026-10)")
+    search_parser.add_argument("--year", "-y", type=int, help="Año de viaje (ej. 2027)")
+    search_parser.add_argument("--month", "-m", help="Mes preferido (AAAA-MM o 1-12, ej. 2027-03 o 3)")
+    search_parser.add_argument("--start-date", help="Fecha de inicio exacta (AAAA-MM-DD)")
+    search_parser.add_argument("--end-date", help="Fecha de fin exacta (AAAA-MM-DD)")
+    search_parser.add_argument(
+        "--event",
+        "-e",
+        choices=["semana-santa", "easter", "puente-mayo", "verano", "agosto", "navidad", "pilar"],
+        help="Evento festivo preconfigurado (ej. semana-santa)",
+    )
+    search_parser.add_argument(
+        "--priority",
+        choices=["balanced", "cheapest", "pto"],
+        default="balanced",
+        help="Prioridad de optimización: 'balanced' (precio + confort + PTO), 'cheapest' (mínimo precio) o 'pto' (máxima eficiencia)",
+    )
+    search_parser.add_argument(
+        "--dual-stopovers",
+        action="store_true",
+        help="Permitir doble escala turística estratégica (en la ida y en la vuelta)",
+    )
+    search_parser.add_argument("--top-k-windows", type=int, default=4, help="Número de ventanas de calendario a evaluar")
     search_parser.add_argument("--country", default="ES", help="País para cálculo de festivos (ej. ES)")
     search_parser.add_argument("--subdiv", default="MD", help="Comunidad autónoma o región (ej. MD)")
     search_parser.add_argument(
         "--provider",
-        default="auto",
+        default=config.FLIGHT_PROVIDER or "google",
         choices=["auto", "mock", "amadeus", "kiwi", "rapidapi", "google", "google-flights", "skyscanner4", "duffel", "pool"],
-        help="API de vuelos o grupo de APIs",
+        help=f"API de vuelos o grupo de APIs (por defecto: {config.FLIGHT_PROVIDER or 'google'})",
     )
     search_parser.add_argument("--min-stopover", type=int, default=1, help="Días mínimos por escala")
     search_parser.add_argument("--max-stopover", type=int, default=3, help="Días máximos por escala")
     search_parser.add_argument(
         "--stopovers",
-        help="Escalas intermedias deseadas separadas por coma (ej. BKK,SIN,DOH,IST)",
+        help="Escalas intermedias deseadas separadas por coma (ej. DOH,DXB,AUH,IST,BKK,ICN,HKG)",
     )
     search_parser.add_argument(
         "--outbound-stopovers",
@@ -608,11 +784,11 @@ def cli_entrypoint():
     )
     search_parser.add_argument(
         "--return-stopovers",
-        help="Escalas intermedias específicas para la vuelta separadas por coma (ej. BKK,SIN,IST,DOH,DXB)",
+        help="Escalas intermedias específicas para la vuelta separadas por coma (ej. BKK,SIN,IST,ICN)",
     )
     search_parser.add_argument(
         "--stopover-preset",
-        choices=["asia_top", "asia_full", "gulf", "europe", "all_asia", "istanbul"],
+        choices=["asia_top", "asia_full", "gulf", "europe", "all_asia", "istanbul", "brasil", "brazil", "latam_top"],
         help="Preset de escalas estratégicas intermedias recomendadas por IA",
     )
     search_parser.add_argument(
@@ -633,6 +809,16 @@ def cli_entrypoint():
         type=int,
         default=1,
         help="Máximo de escalas técnicas permitidas en un único billete/tramo de vuelo. Por defecto: 1",
+    )
+    search_parser.add_argument(
+        "--mix-origins",
+        action="store_true",
+        help="Permitir mezclar ciudades de origen y regreso (ej. empezar en Madrid y terminar en Bilbao o viceversa)",
+    )
+    search_parser.add_argument(
+        "--return-arrivals",
+        "-ra",
+        help="Aeropuertos de regreso en país de origen separados por coma (ej. MAD,BIO)",
     )
     search_parser.add_argument(
         "--dry-run",
@@ -699,10 +885,19 @@ def cli_entrypoint():
             max_pto = args.days_pto
 
             if getattr(args, "trip_days", None):
-                min_days = max(args.trip_days - 3, 3)
-                max_days = args.trip_days + 4
+                min_days = args.trip_days
+                max_days = max(args.trip_days + 4, max_days)
                 if max_pto == 5:
-                    max_pto = max(int(args.trip_days * 0.75), 14)
+                    max_pto = max(int(args.trip_days * 0.75), 12)
+            elif min_days >= 15 and max_pto == 5:
+                max_pto = max(int(min_days * 0.65), 13)
+
+            ret_arrivals = (
+                [x.strip().upper() for x in args.return_arrivals.split(",") if x.strip()]
+                if getattr(args, "return_arrivals", None)
+                else None
+            )
+            mix_origins_flag = getattr(args, "mix_origins", False)
 
             run_search_flow(
                 origins=origins_input,
@@ -711,10 +906,19 @@ def cli_entrypoint():
                 destination=destinations_input[0],
                 max_pto_days=max_pto,
                 month_str=args.month,
+                year=getattr(args, "year", None),
+                start_date_str=getattr(args, "start_date", None),
+                end_date_str=getattr(args, "end_date", None),
+                event=getattr(args, "event", None),
+                priority=getattr(args, "priority", "balanced"),
+                include_dual_stopovers=getattr(args, "dual_stopovers", False),
+                top_k_windows=getattr(args, "top_k_windows", 4),
                 country=args.country,
                 subdivision=args.subdiv,
                 provider_name=args.provider,
                 return_destinations=ret_dests,
+                return_arrivals=ret_arrivals,
+                mix_origins=mix_origins_flag,
                 min_stopover_days=args.min_stopover,
                 max_stopover_days=args.max_stopover,
                 min_trip_days=min_days,

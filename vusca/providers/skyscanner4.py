@@ -193,7 +193,7 @@ class SkyscannerFlights4Provider(BaseFlightProvider):
                     )
                 )
 
-            booking_url = f"https://www.google.com/travel/flights?q=flights+from+{origin}+to+{destination}+on+{travel_date.isoformat()}"
+            booking_url = f"https://www.google.com/travel/flights?q=one-way+flights+from+{origin}+to+{destination}+on+{travel_date.isoformat()}"
 
             offer = FlightLegOffer(
                 provider=self.name,

@@ -65,6 +65,10 @@ class RapidApiFlightProvider(BaseFlightProvider):
         self.api_key = api_key
         self.api_host = api_host
         self._entity_cache: Dict[str, str] = dict(COMMON_ENTITIES)
+        self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=30, max_retries=1)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     @property
     def name(self) -> str:
@@ -87,7 +91,7 @@ class RapidApiFlightProvider(BaseFlightProvider):
 
         for q in queries:
             try:
-                resp = requests.get(
+                resp = self.session.get(
                     f"https://{self.api_host}/flights/auto-complete",
                     headers=headers,
                     params={"query": q},
@@ -146,7 +150,7 @@ class RapidApiFlightProvider(BaseFlightProvider):
             url = f"https://{self.api_host}/api/v1/flights/searchFlights"
 
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=20)
+            resp = self.session.get(url, headers=headers, params=params, timeout=20)
             if resp.status_code == 429:
                 detail = "Rate limit or quota exceeded"
                 try:
@@ -235,7 +239,7 @@ class RapidApiFlightProvider(BaseFlightProvider):
                         )
                     )
 
-                booking_url = f"https://www.google.com/travel/flights?q=flights+from+{origin}+to+{destination}+on+{travel_date.isoformat()}"
+                booking_url = f"https://www.google.com/travel/flights?q=one-way+flights+from+{origin}+to+{destination}+on+{travel_date.isoformat()}"
 
                 offers.append(
                     FlightLegOffer(

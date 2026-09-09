@@ -46,12 +46,33 @@ AIRPORT_COORDS: Dict[str, Tuple[float, float, str, str]] = {
     "RAK": (31.6069, -8.0363, "Marrakech", "Morocco"),
     "KIX": (34.4347, 135.2442, "Osaka Kansai", "Japan"),
     "OSA": (34.7855, 135.4382, "Osaka", "Japan"),
+    "BIO": (43.3011, -2.9106, "Bilbao", "Spain"),
+    "OPO": (41.2481, -8.6814, "Oporto", "Portugal"),
+    "CMN": (33.3675, -7.5899, "Casablanca", "Morocco"),
+    "ICN": (37.4602, 126.4407, "Seúl Incheon", "South Korea"),
+    "HKG": (22.3080, 113.9185, "Hong Kong", "Hong Kong"),
+    "TPE": (25.0797, 121.2342, "Taipéi", "Taiwan"),
+    "HAN": (21.2212, 105.8072, "Hanói", "Vietnam"),
+    "SGN": (10.8188, 106.6518, "Ho Chi Minh", "Vietnam"),
+    "GRU": (-23.4356, -46.4731, "São Paulo", "Brazil"),
+    "GIG": (-22.8089, -43.2436, "Río de Janeiro", "Brazil"),
+    "SSA": (-12.9086, -38.3225, "Salvador de Bahía", "Brazil"),
+    "REC": (-8.1264, -34.9228, "Recife", "Brazil"),
+    "FOR": (-3.7763, -38.5326, "Fortaleza", "Brazil"),
 }
 
 AIRLINES_BY_HUB: Dict[str, Tuple[str, str]] = {
     "MAD": ("IB", "Iberia"),
     "BCN": ("VY", "Vueling"),
+    "BIO": ("IB", "Iberia"),
     "LIS": ("TP", "TAP Air Portugal"),
+    "OPO": ("TP", "TAP Air Portugal"),
+    "CMN": ("AT", "Royal Air Maroc"),
+    "ICN": ("KE", "Korean Air"),
+    "HKG": ("CX", "Cathay Pacific"),
+    "TPE": ("CI", "China Airlines"),
+    "HAN": ("VN", "Vietnam Airlines"),
+    "SGN": ("VN", "Vietnam Airlines"),
     "CDG": ("AF", "Air France"),
     "FCO": ("AZ", "ITA Airways"),
     "FRA": ("LH", "Lufthansa"),
@@ -67,6 +88,11 @@ AIRLINES_BY_HUB: Dict[str, Tuple[str, str]] = {
     "NRT": ("JL", "Japan Airlines"),
     "KIX": ("JL", "Japan Airlines"),
     "OSA": ("NH", "All Nippon Airways"),
+    "GRU": ("LA", "LATAM Airlines"),
+    "GIG": ("LA", "LATAM Airlines"),
+    "SSA": ("G3", "Gol Transportes Aéreos"),
+    "REC": ("AD", "Azul Linhas Aéreas"),
+    "FOR": ("LA", "LATAM Airlines"),
 }
 
 
@@ -102,10 +128,15 @@ class MockFlightProvider(BaseFlightProvider):
         orig = origin.upper()
         dest = destination.upper()
 
-        orig_info = AIRPORT_COORDS.get(orig, (40.4, -3.5, orig, "Unknown"))
-        dest_info = AIRPORT_COORDS.get(dest, (35.0, 139.0, dest, "Unknown"))
+        orig_info = AIRPORT_COORDS.get(orig)
+        dest_info = AIRPORT_COORDS.get(dest)
 
-        distance_km = haversine_km(orig_info[0], orig_info[1], dest_info[0], dest_info[1])
+        if orig_info and dest_info:
+            distance_km = haversine_km(orig_info[0], orig_info[1], dest_info[0], dest_info[1])
+        else:
+            # Fallback for unknown codes: assume typical intercontinental route (~8500 km)
+            distance_km = 8500.0
+
         if distance_km < 100:
             distance_km = 600
 
@@ -139,6 +170,15 @@ class MockFlightProvider(BaseFlightProvider):
         offers: List[FlightLegOffer] = []
         flight_times = [time(7, 30), time(13, 15), time(19, 45)]
 
+        # Long-haul and regional stop calculation
+        # Regional secondary airports (like BIO, OPO) do not have direct non-stop flights to Asia/Americas (>3500 km)
+        is_long_haul = distance_km > 3500
+        is_secondary_airport = orig in ("BIO", "OPO", "RAK", "CMN") or dest in ("BIO", "OPO", "RAK", "CMN")
+        stops_count = 1 if (is_long_haul and is_secondary_airport) else (1 if distance_km > 10000 else 0)
+        
+        if stops_count > 0:
+            flight_time_mins += 180  # Add realistic layover time (3h)
+
         for i in range(2):
             price = round((final_base * (1.0 + (i * 0.12))) * adults, 2)
             dep_time = flight_times[(seed_val + i) % len(flight_times)]
@@ -164,9 +204,9 @@ class MockFlightProvider(BaseFlightProvider):
                 price_eur=price,
                 segments=[seg],
                 total_duration_minutes=flight_time_mins,
-                stops_count=0,
+                stops_count=stops_count,
                 airline_names=[carrier_name],
-                booking_url=f"https://www.google.com/travel/flights?q=flights+from+{orig}+to+{dest}+on+{travel_date.isoformat()}",
+                booking_url=f"https://www.google.com/travel/flights?q=one-way+flights+from+{orig}+to+{dest}+on+{travel_date.isoformat()}",
                 cabin_class="ECONOMY",
             )
             offers.append(offer)

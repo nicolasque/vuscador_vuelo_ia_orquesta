@@ -143,7 +143,7 @@ class AmadeusProvider(BaseFlightProvider):
                         total_duration_minutes=total_duration_mins,
                         stops_count=max(len(parsed_segments) - 1, 0),
                         airline_names=airline_names,
-                        booking_url=f"https://www.google.com/travel/flights?q=flights+from+{origin}+to+{destination}+on+{travel_date.isoformat()}",
+                        booking_url=f"https://www.google.com/travel/flights?q=one-way+flights+from+{origin}+to+{destination}+on+{travel_date.isoformat()}",
                         cabin_class="ECONOMY",
                     )
                 )

@@ -28,6 +28,9 @@ class SearchLegTask(BaseModel):
     travel_date: date
     status: str = "PENDING"  # PENDING, SUCCESS, FAILED, CACHED
     results_count: int = 0
+    min_price_eur: Optional[float] = None
+    provider_name: Optional[str] = None
+    elapsed_seconds: Optional[float] = None
     error_message: Optional[str] = None
     retries: int = 0
 

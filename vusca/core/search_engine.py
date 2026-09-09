@@ -61,11 +61,15 @@ class SearchEngine:
             key = f"{task.origin}:{task.destination}:{task.travel_date.isoformat()}"
 
             # Check previous run completion or DB cache
+            t_cache_start = time.time()
             cached = self.db.get_cached_offers(task.origin, task.destination, task.travel_date)
             if cached is not None:
                 offers_by_key[key] = cached
                 task.status = "CACHED"
                 task.results_count = len(cached)
+                task.provider_name = "SQLite DB"
+                task.elapsed_seconds = round(time.time() - t_cache_start, 3)
+                task.min_price_eur = min((o.price_eur for o in cached), default=None) if cached else None
                 with self._lock:
                     self._completed_count += 1
                     current = self._completed_count
@@ -77,18 +81,24 @@ class SearchEngine:
                 return
 
             # Need to query external provider
+            t_ext_start = time.time()
             success = False
             for attempt in range(1, self.max_retries + 1):
                 try:
                     time.sleep(self.query_delay)
+                    t_api_start = time.time()
                     offers = self.provider.search_leg(
                         origin=task.origin,
                         destination=task.destination,
                         travel_date=task.travel_date,
                     )
+                    api_duration = round(time.time() - t_api_start, 2)
                     offers_by_key[key] = offers
                     task.status = "SUCCESS"
                     task.results_count = len(offers)
+                    task.provider_name = self.provider.name
+                    task.elapsed_seconds = api_duration
+                    task.min_price_eur = min((o.price_eur for o in offers), default=None) if offers else None
                     task.error_message = None
                     self.db.save_cached_offers(
                         task.origin, task.destination, task.travel_date, self.provider.name, offers
@@ -107,6 +117,8 @@ class SearchEngine:
 
             if not success:
                 task.status = "FAILED"
+                task.provider_name = self.provider.name
+                task.elapsed_seconds = round(time.time() - t_ext_start, 2)
                 offers_by_key[key] = []
 
             with self._lock:

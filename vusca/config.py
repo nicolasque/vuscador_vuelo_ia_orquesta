@@ -74,5 +74,5 @@ DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "ES").upper()
 DEFAULT_SUBDIV = os.getenv("DEFAULT_SUBDIV", "MD").upper()
 
 # Rate limiting defaults (seconds between API calls to stay within free tier)
-DEFAULT_API_DELAY_SECONDS = float(os.getenv("DEFAULT_API_DELAY_SECONDS", "0.15"))
-SEARCH_CONCURRENCY = int(os.getenv("SEARCH_CONCURRENCY", "4"))
+DEFAULT_API_DELAY_SECONDS = float(os.getenv("DEFAULT_API_DELAY_SECONDS", "0.05"))
+SEARCH_CONCURRENCY = int(os.getenv("SEARCH_CONCURRENCY", "8"))
