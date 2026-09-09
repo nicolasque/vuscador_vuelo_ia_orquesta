@@ -31,6 +31,14 @@ class FlightLegOffer(BaseModel):
     booking_url: Optional[str] = None
     cabin_class: str = "ECONOMY"
 
+    @property
+    def flight_search_url(self) -> str:
+        """Returns direct booking URL or generates a Google Flights search link."""
+        if self.booking_url:
+            return self.booking_url
+        d_str = self.departure_date.isoformat() if hasattr(self.departure_date, 'isoformat') else str(self.departure_date)
+        return f"https://www.google.com/travel/flights?q=flights+from+{self.origin}+to+{self.destination}+on+{d_str}"
+
     @model_validator(mode="after")
     def compute_stops_count(self) -> "FlightLegOffer":
         if self.segments and len(self.segments) > 1:

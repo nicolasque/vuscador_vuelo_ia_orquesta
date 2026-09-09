@@ -2,6 +2,8 @@
 
 **Buscador inteligente de vuelos multidestino con orquestación de Agentes de IA, optimizador de vacaciones laborales (PTO) y generador de escalas estratégicas de 1 o más días.**
 
+> 📖 **Documentación para Agentes y Desarrolladores:** Consulta el manual de arquitectura completa y flujo de datos en [AGENTS_HANDBOOK.md](AGENTS_HANDBOOK.md).
+
 ---
 
 ## 🌟 Características Principales

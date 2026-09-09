@@ -161,6 +161,8 @@ def run_search_flow(
             w.summary,
         )
     console.print(win_table)
+    pto_rationale = pto_agent.get_strategy_rationale(optimal_windows)
+    console.print(Panel(pto_rationale, title="🎯 Justificación de Calendario (Por Qué se Buscan Estas Fechas)", border_style="yellow"))
     if date_flexibility > 0:
         console.print(f"[cyan]ℹ️ Flexibilidad activa: se evaluarán [bold]{len(candidate_windows)}[/bold] combinaciones de fechas (±{date_flexibility} días).[/cyan]\n")
     else:
@@ -223,6 +225,16 @@ def run_search_flow(
             stopover_reasons.get(code, "Hub estratégico de conexión internacional"),
         )
     console.print(route_table)
+
+    hub_rationale = route_agent.get_hub_strategy_explanation(candidate_codes)
+    open_jaw_strategy = route_agent.get_open_jaw_strategy(destinations_list, ret_dest_list)
+    console.print(
+        Panel(
+            f"{hub_rationale}\n\n- **Estrategia Open-Jaw (Multiciudad):** {open_jaw_strategy}",
+            title="🎯 Justificación de Rutas y Hubs (Por Qué se Alimenta al Motor)",
+            border_style="magenta",
+        )
+    )
     console.print()
 
     # -------------------------------------------------------------
@@ -235,6 +247,9 @@ def run_search_flow(
         "SIN": "Singapur", "ICN": "Seúl", "TPE": "Taipéi",
         "HKG": "Hong Kong", "DOH": "Doha", "DXB": "Dubái",
         "IST": "Estambul", "AUH": "Abu Dhabi",
+        "BOG": "Bogotá", "MDE": "Medellín", "CTG": "Cartagena",
+        "PTY": "Ciudad de Panamá", "CUN": "Cancún", "SDQ": "Santo Domingo",
+        "LIS": "Lisboa", "MIA": "Miami",
     }
     for k, v in known_names.items():
         if k not in stopover_names:
@@ -348,11 +363,36 @@ def run_search_flow(
     with console.status("[bold green]🤖 [5/5] Agente Sintetizador de IA analizando y calificando resultados...[/bold green]"):
         synthesis_agent = SynthesisAgent()
         ranked_itineraries = synthesis_agent.evaluate_and_rank(itineraries)
+
+        search_context = {
+            "origins": origins_list,
+            "destinations": destinations_list,
+            "return_destinations": ret_dest_list,
+            "candidate_windows": candidate_windows,
+            "optimal_windows": optimal_windows,
+            "candidate_stopovers": candidate_codes,
+            "stopover_names": stopover_names,
+            "pto_strategy": pto_rationale,
+            "hub_strategy": hub_rationale,
+            "open_jaw_strategy": open_jaw_strategy,
+            "constraints": {
+                "max_scales": max_scales,
+                "max_stops_per_leg": max_stops_per_leg,
+                "max_pto_days": max_pto_days,
+                "date_flexibility": date_flexibility,
+            },
+            "stats": {
+                "total_blueprints": len(blueprints),
+                "total_leg_tasks": len(leg_tasks),
+            },
+        }
+
         report_markdown = synthesis_agent.generate_final_report(
             origin=origin,
             destination=destination,
             itineraries=ranked_itineraries,
             candidate_stopover_names=stopover_names,
+            search_context=search_context,
         )
         search_job.ai_final_analysis = report_markdown
         db.save_job(search_job)
@@ -433,11 +473,41 @@ def resume_flow(job_id: str):
 
     synthesis_agent = SynthesisAgent()
     ranked = synthesis_agent.evaluate_and_rank(itineraries)
+
+    origins_list = [o.strip() for o in job.origin.split(",") if o.strip()]
+    destinations_list = [d.strip() for d in job.final_destination.split(",") if d.strip()]
+    ret_dest_list = job.return_destinations or destinations_list
+
+    route_agent = RouteAgent()
+    pto_agent = PTOAgent(country=job.country, subdivision=job.subdivision)
+
+    search_context = {
+        "origins": origins_list,
+        "destinations": destinations_list,
+        "return_destinations": ret_dest_list,
+        "candidate_windows": job.candidate_windows,
+        "candidate_stopovers": job.candidate_stopovers,
+        "stopover_names": job.stopover_names,
+        "pto_strategy": pto_agent.get_strategy_rationale(job.candidate_windows),
+        "hub_strategy": route_agent.get_hub_strategy_explanation(job.candidate_stopovers),
+        "open_jaw_strategy": route_agent.get_open_jaw_strategy(destinations_list, ret_dest_list),
+        "constraints": {
+            "max_scales": 2,
+            "max_stops_per_leg": 1,
+            "max_pto_days": job.max_pto_days,
+        },
+        "stats": {
+            "total_blueprints": len(blueprints),
+            "total_leg_tasks": len(job.tasks),
+        },
+    }
+
     report_md = synthesis_agent.generate_final_report(
         origin=job.origin,
         destination=job.final_destination,
         itineraries=ranked,
         candidate_stopover_names=job.stopover_names,
+        search_context=search_context,
     )
     job.ai_final_analysis = report_md
     db.save_job(job)

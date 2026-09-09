@@ -174,6 +174,48 @@ GLOBAL_HUBS: Dict[str, Dict[str, str]] = {
         "airline": "SWISS",
         "description": "Hub alpino de alta precisión con vuelos directos diarios a Tokio Narita.",
     },
+    "PTY": {
+        "name": "Ciudad de Panamá",
+        "country": "Panamá",
+        "corridors": ["EUROPE_LATAM", "NORTH_SOUTH_AMERICA"],
+        "airline": "Copa Airlines",
+        "description": "El 'Hub de las Américas'. Programa Panamá Stopover sin coste adicional y a solo 1h de vuelo de Bogotá.",
+    },
+    "CUN": {
+        "name": "Cancún",
+        "country": "México",
+        "corridors": ["EUROPE_LATAM", "NORTH_SOUTH_AMERICA"],
+        "airline": "Wingo / Volaris / Avianca",
+        "description": "Playas del Caribe mexicano, cenotes y ruinas mayas. Excelente conexión low-cost hacia Colombia.",
+    },
+    "SDQ": {
+        "name": "Santo Domingo",
+        "country": "República Dominicana",
+        "corridors": ["EUROPE_LATAM", "CARIBBEAN_LATAM"],
+        "airline": "Arajet / Air Europa",
+        "description": "Zona Colonial histórica, gastronomía caribeña y puente asequible de vuelos hacia Colombia.",
+    },
+    "BOG": {
+        "name": "Bogotá",
+        "country": "Colombia",
+        "corridors": ["EUROPE_LATAM", "NORTH_SOUTH_AMERICA"],
+        "airline": "Avianca / LATAM",
+        "description": "Capital andina, Museo del Oro, Monserrate y centro cultural y gastronómico de Colombia.",
+    },
+    "MDE": {
+        "name": "Medellín",
+        "country": "Colombia",
+        "corridors": ["EUROPE_LATAM", "NORTH_SOUTH_AMERICA"],
+        "airline": "Avianca / Wingo",
+        "description": "Ciudad de la Eterna Primavera, Comuna 13, innovación urbana y trampolín al Eje Cafetero y Guatapé.",
+    },
+    "CTG": {
+        "name": "Cartagena de Indias",
+        "country": "Colombia",
+        "corridors": ["EUROPE_LATAM", "CARIBBEAN_LATAM"],
+        "airline": "Avianca / Air Europa",
+        "description": "Ciudad amurallada colonial, arquitectura de cuento y playas caribeñas de las Islas del Rosario.",
+    },
 }
 
 HUB_PRESETS: Dict[str, List[str]] = {
@@ -302,3 +344,58 @@ class RouteAgent:
                     reasons[code] = GLOBAL_HUBS[code]["description"]
 
         return selected_codes, names, reasons
+
+    def get_hub_strategy_explanation(self, candidate_codes: List[str]) -> str:
+        """Returns a clear explanation of why these hubs were selected for the search engine."""
+        if not candidate_codes:
+            return "No se configuraron escalas intermedias (búsqueda directa exclusiva)."
+
+        lines = [
+            "- **Objetivo de los Hubs Intermedios:** Dividir trayectos de larga distancia, reducir tarifas aprovechando aerolíneas de enlace y añadir un destino turístico extra de 1 a 3 días sin comprar billetes independientes.",
+        ]
+        for c in candidate_codes:
+            info = GLOBAL_HUBS.get(c, {})
+            name = info.get("name", c)
+            airline = info.get("airline", "Aerolíneas de enlace")
+            desc = info.get("description", "Hub de conexión estratégica")
+            lines.append(f"  - **{name} ({c}) - {airline}:** {desc}")
+        return "\n".join(lines)
+
+    def get_open_jaw_strategy(self, destinations: List[str], return_destinations: List[str]) -> str:
+        """Returns a contextual explanation of why Open-Jaw (multiciudad) is recommended for this trip."""
+        d_set = {d.upper() for d in destinations}
+        r_set = {r.upper() for r in return_destinations}
+        all_cities = d_set.union(r_set)
+
+        if len(r_set) <= 1 and r_set == d_set:
+            return "Ruta clásica de ida y vuelta a la misma ciudad de entrada."
+
+        # Japan context
+        if any(c in all_cities for c in ("TYO", "NRT", "HND", "OSA", "KIX", "ITM")):
+            return (
+                "La ruta Multiciudad (Open-Jaw) entrando por Tokio (`TYO`) y saliendo por Osaka (`OSA`) "
+                "permite recorrer Japón de manera lineal (Tokio ➔ Kioto ➔ Nara ➔ Osaka) sin tener que desandar el camino "
+                "de vuelta a Tokio en tren bala Shinkansen. Esto ahorra ~100 € por viajero y entre 4 y 5 horas de viaje."
+            )
+
+        # Colombia context
+        if any(c in all_cities for c in ("BOG", "MDE", "CTG", "CLO")):
+            return (
+                "La ruta Multiciudad (Open-Jaw) entrando por Bogotá (`BOG`) y regresando desde Cartagena de Indias (`CTG`) o Medellín (`MDE`) "
+                "permite recorrer Colombia linealmente de sur a norte (Andes ➔ Eje Cafetero ➔ Medellín ➔ Caribe) sin tener que retroceder "
+                "a Bogotá. Esto ahorra un vuelo interno adicional (~60-90 €/persona) y evita perder un día entero de vacaciones en traslados innecesarios."
+            )
+
+        # Southeast Asia context
+        if any(c in all_cities for c in ("BKK", "HKT", "CNX", "SIN", "KUL", "HAN", "SGN")):
+            return (
+                "La ruta Multiciudad (Open-Jaw) combinando dos ciudades principales (ej. Bangkok y Phuket, o Singapur y Bali) "
+                "permite explorar zonas culturales o metropolitanas primero y culminar el viaje relajándose en la playa o islas, "
+                "sin gastar presupuesto ni horas de viaje en regresar al punto inicial."
+            )
+
+        return (
+            "La ruta Multiciudad (Open-Jaw) te permite diseñar un itinerario lineal entre regiones geográficas diferentes, "
+            "optimizando tus días de vacaciones al evitar desandar el camino hacia el aeropuerto de llegada y eliminando un vuelo interno."
+        )
+

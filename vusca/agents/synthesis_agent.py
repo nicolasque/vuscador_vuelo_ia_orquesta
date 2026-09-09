@@ -59,6 +59,7 @@ class SynthesisAgent:
         destination: str,
         itineraries: List[Itinerary],
         candidate_stopover_names: Dict[str, str],
+        search_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Generates an executive analysis report using Gemini or heuristic template."""
         if not itineraries:
@@ -69,61 +70,217 @@ class SynthesisAgent:
         cheapest = min(ranked, key=lambda it: it.total_price_eur)
         best_pto = max(ranked, key=lambda it: it.pto_efficiency_ratio)
 
+        ctx = search_context or {}
+
         if self.llm.is_available:
             ai_report = self._generate_with_gemini(
-                origin, destination, ranked[:5], best_overall, cheapest, best_pto
+                origin, destination, ranked, best_overall, cheapest, best_pto, candidate_stopover_names, ctx
             )
             if ai_report:
                 return ai_report
 
         return self._generate_heuristic_report(
-            origin, destination, ranked, best_overall, cheapest, best_pto, candidate_stopover_names
+            origin, destination, ranked, best_overall, cheapest, best_pto, candidate_stopover_names, ctx
         )
 
     def _generate_with_gemini(
         self,
         origin: str,
         destination: str,
-        top_itineraries: List[Itinerary],
+        ranked: List[Itinerary],
         best_overall: Itinerary,
         cheapest: Itinerary,
         best_pto: Itinerary,
+        candidate_stopover_names: Dict[str, str],
+        context: Dict[str, Any],
     ) -> Optional[str]:
+        origins_list = context.get("origins") or [o.strip() for o in origin.split(",") if o.strip()]
+        destinations_list = context.get("destinations") or [d.strip() for d in destination.split(",") if d.strip()]
+
         prompt = (
-            f"Como asistente experto en viajes e inteligencia de vuelos, redacta un informe ejecutivo "
-            f"en español y en formato Markdown para un viaje desde {origin} hasta {destination}.\n\n"
-            f"DATOS DE LAS MEJORES OPCIONES ENCONTRADAS:\n"
-            f"- MEJOR OPCIÓN GLOBAL: {best_overall.route_summary} | Precio: {best_overall.total_price_eur}€ | "
-            f"Días totales: {best_overall.total_trip_days} (Vacaciones gastadas: {best_overall.work_days_needed}) | "
-            f"Fechas: {best_overall.start_date} a {best_overall.end_date}.\n"
-            f"- MÁS ECONÓMICA: {cheapest.route_summary} | Precio: {cheapest.total_price_eur}€.\n"
-            f"- MAYOR EFICIENCIA PTO: {best_pto.route_summary} | Ratio: x{best_pto.pto_efficiency_ratio}.\n\n"
-            f"DETALLES DE LOS TRAMOS:\n"
+            f"Como asistente experto en inteligencia de viajes y vuelos internacionales de Vusca, "
+            f"redacta un informe ejecutivo exhaustivo en español y en formato Markdown para un viaje "
+            f"desde {', '.join(origins_list)} hasta {', '.join(destinations_list)}.\n\n"
+            f"CONTEXTO Y JUSTIFICACIÓN DE LA BÚSQUEDA (POR QUÉ SE BUSCÓ DE ESTA MANERA):\n"
+            f"- Justificación de calendario (PTO): {context.get('pto_strategy', 'Optimización de días de vacaciones con festivos')}\n"
+            f"- Justificación de hubs y paradas: {context.get('hub_strategy', 'Escalas estratégicas de 1-3 días en hubs con stopover')}\n"
+            f"- Justificación Multiciudad (Open-Jaw): {context.get('open_jaw_strategy', 'Rutas lineales sin retroceder')}\n"
+            f"- Restricciones de confort: Máximo 1 escala de conexión por tramo de billete, máximo 2 escalas totales por sentido.\n\n"
+            f"DATOS DE LAS MEJORES OPCIONES ENCONTRADAS ({len(ranked)} evaluadas):\n"
+            f"- GANADOR GLOBAL: {best_overall.route_summary} | {best_overall.total_price_eur}€ | {best_overall.total_trip_days}d ({best_overall.work_days_needed} PTO)\n"
+            f"- MÁS ECONÓMICA: {cheapest.route_summary} | {cheapest.total_price_eur}€ | {cheapest.total_trip_days}d ({cheapest.work_days_needed} PTO)\n"
+            f"- MÁXIMA EFICIENCIA PTO: {best_pto.route_summary} | Ratio x{best_pto.pto_efficiency_ratio} | {best_pto.total_trip_days}d ({best_pto.work_days_needed} PTO)\n\n"
+            f"TRAMOS CON ENLACES DIRECTOS DE RESERVA:\n"
         )
 
-        for idx, it in enumerate(top_itineraries, 1):
-            prompt += f"\nOpción {idx} (Puntuación AI: {it.ai_score}/100):\n"
-            prompt += f"  Ruta: {it.route_summary} - Total: {it.total_price_eur}€\n"
+        for idx, it in enumerate(ranked[:5], 1):
+            prompt += f"\nOpción {idx} ({it.ai_score}/100) - {it.route_summary} - Total: {it.total_price_eur}€:\n"
             for leg in it.legs:
+                carriers = ", ".join(leg.airline_names) or "Aerolínea"
                 prompt += (
                     f"    * Tramo {leg.origin} -> {leg.destination} ({leg.departure_date}): "
-                    f"{leg.price_eur}€ con {', '.join(leg.airline_names) or 'Aerolínea'}\n"
+                    f"{leg.price_eur}€ con {carriers} ({leg.stops_count} escalas) | Link: {leg.flight_search_url}\n"
                 )
-            if it.stopovers:
-                s = it.stopovers[0]
-                prompt += f"    * Escala de {s.stay_days} días en {s.city_name} ({s.arrival_date} al {s.departure_date})\n"
 
         prompt += (
-            "\nESTRUCTURA DEL INFORME QUE DEBES GENERAR:\n"
-            "1. Resumen Ejecutivo y Ganador Recomendado (por qué merece la pena la parada intermedia).\n"
-            "2. Tabla Comparativa de las Mejores Opciones (Ruta, Días Totales, Días de Vacaciones, Precio Total, Puntuación).\n"
-            "3. Consejos Prácticos para la Escala Intermedia (qué hacer en 1-2 días en la ciudad de stopover, equipaje facturado vs de mano, etc.).\n"
-            "4. Desglose detallado de vuelos con sus enlaces o pautas de reserva.\n"
-            "Sé persuasivo, claro y profesional."
+            "\nESTRUCTURA OBLIGATORIA DEL INFORME (igual a la utilizada en Japón y Colombia):\n"
+            "1. Título e introducción con resumen del análisis de la IA.\n"
+            "2. Configuración y Justificación de la Búsqueda (Por qué se ha hecho de esta manera: calendario, festivos, hubs y Open-Jaw).\n"
+            "3. Opciones Destacadas Globales (El Podio: Ganador Global, Más Económica, Mayor Rendimiento).\n"
+            "4. Tablas Comparativas por Aeropuerto de Origen (separando Madrid, Bilbao, etc. si hay varios orígenes).\n"
+            "5. Desglose Exhaustivo de las Mejores Opciones (con los links directos [Ver Vuelos en Google Flights](url) para CADA tramo individual).\n"
+            "6. Estrategia Multiciudad / Open-Jaw específica para el destino.\n"
+            "7. Consejos Logísticos para las Escalas Intermedias (equipaje facturado, hoteles de stopover, tiempos).\n"
+            "Sé riguroso, analítico, persuasivo y estructurado."
         )
 
-        system_inst = "Eres el Agente Sintetizador de Vuelos Inteligente de Vusca. Analizas vuelos y maximizas la experiencia y el ahorro del viajero."
+        system_inst = "Eres el Agente Sintetizador de Vuelos de Vusca. Generas informes de viaje de nivel profesional con enlaces reales y explicaciones estratégicas."
         return self.llm.generate_text(prompt, system_instruction=system_inst)
+
+    @staticmethod
+    def _format_price(p: float) -> str:
+        return f"{p:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _format_itinerary_card(
+        self,
+        it: Itinerary,
+        rank_num: int,
+        medal: str,
+        stop_names: Dict[str, str],
+        dest_label: str,
+    ) -> str:
+        out = []
+        st = it.stopovers
+
+        # Build attractive title
+        if len(st) >= 2:
+            s1_name = st[0].city_name
+            s2_name = st[1].city_name
+            if rank_num == 1 and dest_label == "Japón":
+                title = f'{medal} Opción {rank_num}: La "Ruta Dorada de Asia Oriental" (Japón + {s1_name} + {s2_name})'
+            elif rank_num == 1:
+                title = f"{medal} Opción {rank_num}: La Gran Ruta {dest_label} ({dest_label} + {s1_name} + {s2_name})"
+            else:
+                title = f"{medal} Opción {rank_num}: {dest_label} + {s1_name} + {s2_name}"
+        elif len(st) == 1:
+            s_name = st[0].city_name
+            if rank_num == 1:
+                title = f"{medal} Opción {rank_num}: Ruta Panorámica ({dest_label} + {s_name})"
+            else:
+                title = f"{medal} Opción {rank_num}: {dest_label} + {s_name}"
+        else:
+            final_name = stop_names.get(it.final_destination, it.final_destination)
+            title = f"{medal} Opción {rank_num}: Ruta Confort / Base ({it.origin} ➔ {final_name})"
+
+        # Format Route summary with full city names and Open-Jaw detection
+        route_str = it.route_summary
+        for code, name in stop_names.items():
+            route_str = route_str.replace(f" {code} ", f" {name} ")
+            if route_str.endswith(f" {code}"):
+                route_str = route_str[:-len(code)] + name
+            if route_str.startswith(f"{code} "):
+                route_str = name + route_str[len(code):]
+
+        import re
+        route_str = re.sub(r'\(1d\)', '(1 día)', route_str)
+        route_str = re.sub(r'\((\d+)d\)', r'(\1 días)', route_str)
+
+        # Detect Open-Jaw (entry != exit)
+        is_open_jaw = False
+        if len(it.legs) >= 2:
+            outbound_dest = it.legs[0].destination if len(it.legs) == 2 else it.legs[1].destination
+            inbound_orig = it.legs[1].origin if len(it.legs) == 2 else (it.legs[2].origin if len(it.legs) == 4 else (it.legs[1].origin if len(it.legs) == 3 and "inbound" in it.itinerary_id else it.legs[-1].origin))
+            if outbound_dest != inbound_orig:
+                is_open_jaw = True
+                route_str = route_str.replace("| Regreso:", "| Regreso Open-Jaw:")
+
+        s_date = it.start_date.strftime("%d/%m/%Y")
+        e_date = it.end_date.strftime("%d/%m/%Y")
+
+        out.append(f"### {title}\n")
+        out.append(f"- **Precio Total: {self._format_price(it.total_price_eur)}**")
+        out.append(f"- **Duración:** {it.total_trip_days} días ({s_date} al {e_date}) | **Vacaciones requeridas: {it.work_days_needed} días**")
+        out.append(f"- **Ruta:** `{route_str}`")
+        out.append("- **Desglose de Vuelos:**")
+
+        for idx, leg in enumerate(it.legs, 1):
+            d_str = leg.departure_date.strftime("%d/%m/%Y")
+            carriers = ", ".join(leg.airline_names) or "Aerolínea"
+
+            # Detailed stops explanation
+            if leg.stops_count == 0:
+                stops_detail = "Vuelo **DIRECTO** sin escalas"
+            elif leg.stops_count == 1:
+                transfers = [s.arrival_airport for s in leg.segments[:-1]] if leg.segments else []
+                transfer_str = f" en {', '.join(transfers)}" if transfers else ""
+                stops_detail = f"1 escala técnica{transfer_str}"
+            else:
+                transfers = [s.arrival_airport for s in leg.segments[:-1]] if leg.segments else []
+                transfer_str = f" en {', '.join(transfers)}" if transfers else ""
+                stops_detail = f"{leg.stops_count} escalas técnicas{transfer_str}"
+
+            out.append(
+                f"  {idx}. **{d_str}:** [{leg.origin} ➔ {leg.destination}]({leg.flight_search_url}) "
+                f"por **{self._format_price(leg.price_eur)}** | *{carriers}* ({stops_detail})."
+            )
+
+        # Escalas summary line
+        if len(it.legs) == 4 and len(st) >= 2:
+            t_out = it.legs[0].stops_count + it.legs[1].stops_count
+            t_in = it.legs[2].stops_count + it.legs[3].stops_count
+            t_out_desc = f"{t_out} técnica + " if t_out else ""
+            t_in_desc = f" + {t_in} técnica" if t_in else ""
+            s1_d = f"{st[0].stay_days} día" if st[0].stay_days == 1 else f"{st[0].stay_days} días"
+            s2_d = f"{st[1].stay_days} día" if st[1].stay_days == 1 else f"{st[1].stay_days} días"
+            out_str = f"Ida = {t_out + 1} escalas ({t_out_desc}{s1_d} en {st[0].city_name})"
+            in_str = f"Vuelta = {t_in + 1} escalas ({s2_d} en {st[1].city_name}{t_in_desc})"
+            out.append(f"- **Escalas:** {out_str} | {in_str}.")
+        elif len(it.legs) == 3 and len(st) == 1:
+            s_d = f"{st[0].stay_days} día" if st[0].stay_days == 1 else f"{st[0].stay_days} días"
+            if st[0].city_code == it.legs[0].destination:
+                t_out = it.legs[0].stops_count + it.legs[1].stops_count
+                t_in = it.legs[2].stops_count
+                t_out_desc = f"{t_out} técnica + " if t_out else ""
+                t_in_desc = f"{t_in} técnica" if t_in else "Directo"
+                out_str = f"Ida = {t_out + 1} escalas ({t_out_desc}{s_d} en {st[0].city_name})"
+                in_str = f"Vuelta = {t_in} escalas ({t_in_desc})"
+            else:
+                t_out = it.legs[0].stops_count
+                t_in = it.legs[1].stops_count + it.legs[2].stops_count
+                t_out_desc = f"{t_out} técnica" if t_out else "Directo"
+                t_in_desc = f" + {t_in} técnica" if t_in else ""
+                out_str = f"Ida = {t_out} escalas ({t_out_desc})"
+                in_str = f"Vuelta = {t_in + 1} escalas ({s_d} en {st[0].city_name}{t_in_desc})"
+            out.append(f"- **Escalas:** {out_str} | {in_str}.")
+        elif len(it.legs) == 2:
+            s0 = "Vuelo Directo" if it.legs[0].stops_count == 0 else f"{it.legs[0].stops_count} escala técnica"
+            s1 = "Vuelo Directo" if it.legs[1].stops_count == 0 else f"{it.legs[1].stops_count} escala técnica"
+            out.append(f"- **Escalas:** Ida = {s0} | Vuelta = {s1}.")
+
+        # Ventaja
+        if is_open_jaw and len(st) >= 2:
+            ventaja = (
+                f"Recorrido lineal en destino sin desandar el camino ni pagar vuelos internos de regreso. "
+                f"Añade 2 destinos extra ({st[0].city_name} y {st[1].city_name}) aprovechando escalas estratégicas."
+            )
+        elif is_open_jaw and len(st) == 1:
+            ventaja = (
+                f"Ahorro de trayecto interno en destino gracias al formato Open-Jaw, sumando una escala turística en {st[0].city_name}."
+            )
+        elif is_open_jaw:
+            ventaja = (
+                "Ruta multiciudad (Open-Jaw) que ahorra tiempo y dinero al evitar volver a la ciudad de llegada para coger el vuelo de vuelta."
+            )
+        elif len(st) >= 2:
+            ventaja = f"Permite conocer {st[0].city_name} y {st[1].city_name} dividiendo los vuelos largos y reduciendo el jet lag."
+        elif len(st) == 1:
+            ventaja = f"Permite disfrutar de {st[0].stay_days} días en {st[0].city_name} dividiendo el viaje intercontinental."
+        else:
+            ventaja = "Ruta directa y eficiente para quien prioriza llegar al destino principal en el menor tiempo posible."
+
+        out.append(f"- **Ventaja:** {ventaja}")
+
+        return "\n".join(out)
 
     def _generate_heuristic_report(
         self,
@@ -134,92 +291,159 @@ class SynthesisAgent:
         cheapest: Itinerary,
         best_pto: Itinerary,
         candidate_stopover_names: Optional[Dict[str, str]] = None,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str:
         stop_names = candidate_stopover_names or {}
-        md = []
-        md.append(f"# ✈️ Informe de Búsqueda Inteligente: {origin} ➔ {destination}\n")
+        ctx = context or {}
+        origins_list = ctx.get("origins") or [o.strip() for o in origin.split(",") if o.strip()]
+        destinations_list = ctx.get("destinations") or [d.strip() for d in destination.split(",") if d.strip()]
+
+        # Determine country or destination label
+        all_dests = {d.upper() for d in destinations_list}
+        if any(d in all_dests for d in ("TYO", "OSA", "NRT", "HND", "KIX")):
+            dest_label = "Japón"
+        elif any(d in all_dests for d in ("BOG", "MDE", "CTG", "CLO")):
+            dest_label = "Colombia"
+        elif any(d in all_dests for d in ("BKK", "HKT", "CNX")):
+            dest_label = "Tailandia"
+        else:
+            dest_label = " / ".join([stop_names.get(d, d) for d in destinations_list])
+
+        origins_str = " / ".join([stop_names.get(o, o) for o in origins_list])
+        dest_str = " / ".join([stop_names.get(d, d) for d in destinations_list])
+
+        md: List[str] = []
+
+        # 1. Título
+        md.append(f"# ✈️ Informe de Búsqueda Inteligente: {origins_str} ➔ {dest_str}\n")
         md.append(
             "> Este informe ha sido analizado y sintetizado por el **Agente de Inteligencia Artificial** de Vusca, "
-            "optimizando días de vacaciones y escalas estratégicas.\n"
+            "maximizando el rendimiento vacacional, evaluando escalas estratégicas y garantizando conexiones cómodas.\n"
         )
 
-        md.append("## 🏆 Opciones Destacadas\n")
+        # 2. Configuración y Justificación de la Búsqueda
+        md.append("## 🎯 Configuración y Justificación de la Búsqueda (Por Qué se Buscó de Esta Manera)\n")
+
+        # Justificación de calendario
+        pto_strat = ctx.get("pto_strategy")
+        md.append("### 📅 1. Estrategia de Calendario y Festivos (PTO)")
+        if pto_strat:
+            md.append(f"{pto_strat}\n")
+        else:
+            md.append(
+                f"- **Objetivo:** Maximizar días naturales de viaje minimizando el consumo de vacaciones.\n"
+                f"- **Rendimiento:** Opciones de hasta **{best_pto.total_trip_days} días de viaje** utilizando únicamente "
+                f"**{best_pto.work_days_needed} días de vacaciones** laborables (eficiencia **x{best_pto.pto_efficiency_ratio}**).\n"
+            )
+
+        # Justificación de Hubs
+        hub_strat = ctx.get("hub_strategy")
+        md.append("### 🌍 2. Estrategia de Hubs y Paradas Intermedias (Stopovers)")
+        if hub_strat:
+            md.append(f"{hub_strat}\n")
+        else:
+            md.append(
+                "- **Objetivo:** Seleccionar aeropuertos clave con programas de escala (stopover) y tarifas de enlace "
+                "competitivas para romper los vuelos largos y disfrutar de 1 a 3 días en un destino adicional sin billetes extra.\n"
+            )
+
+        # Justificación Open-Jaw
+        open_jaw_strat = ctx.get("open_jaw_strategy")
+        if open_jaw_strat:
+            md.append("### 🔄 3. Estrategia Multiciudad (Open-Jaw)")
+            md.append(f"{open_jaw_strat}\n")
+
+        # Reglas de Confort y Métricas
+        constraints = ctx.get("constraints", {})
+        stats = ctx.get("stats", {})
+        md.append("### 🛑 4. Reglas de Confort y Poda Algorítmica")
+        max_scales = constraints.get("max_scales", 2)
+        max_stops_leg = constraints.get("max_stops_per_leg", 1)
+        tot_bp = stats.get("total_blueprints", len(ranked))
+        tot_tasks = stats.get("total_leg_tasks", "deduplicadas")
+
         md.append(
-            f"- **🥇 Mejor Opción Global (Score {best_overall.ai_score}/100):** {best_overall.route_summary}\n"
-            f"  - **Precio Total:** `{best_overall.total_price_eur} €`\n"
-            f"  - **Calendario:** Del `{best_overall.start_date}` al `{best_overall.end_date}` "
-            f"({best_overall.total_trip_days} días totales usando solo **{best_overall.work_days_needed} días de vacaciones**)\n"
-            f"  - **Eficiencia PTO:** `x{best_overall.pto_efficiency_ratio}` (por cada día pedido trabajas disfrutas {best_overall.pto_efficiency_ratio} días de viaje)\n"
+            f"- **Máximo {max_stops_leg} escala técnica por billete:** Se descartan vuelos con conexiones múltiples agotadoras.\n"
+            f"- **Máximo {max_scales} escalas totales por sentido:** 1 escala turística de varios días + como máximo 1 escala de conexión técnica.\n"
+            f"- **Eficiencia de búsqueda:** Se evaluaron **{tot_bp} itinerarios combinatorios**, podados algorítmicamente a **{tot_tasks} consultas atómicas** para proteger la cuota de la API y garantizar datos frescos.\n"
         )
 
-        if cheapest.itinerary_id != best_overall.itinerary_id:
-            md.append(
-                f"- **💰 Opción Más Económica:** {cheapest.route_summary} a solo `{cheapest.total_price_eur} €`\n"
-            )
+        # 3. Cuadro Ampliado de Posibilidades (Tabla Grande Reducida)
+        md.append("## 📊 Cuadro Ampliado de Posibilidades (Comparativa de Opciones)\n")
+        unique_origins = list(dict.fromkeys([it.origin for it in ranked]))
 
-        if best_pto.itinerary_id != best_overall.itinerary_id:
-            md.append(
-                f"- **⚡ Mayor Rendimiento Vacacional:** {best_pto.route_summary} "
-                f"({best_pto.total_trip_days} días de viaje con {best_pto.work_days_needed} días de vacaciones, ratio `x{best_pto.pto_efficiency_ratio}`)\n"
-            )
+        for orig_code in unique_origins:
+            orig_name = stop_names.get(orig_code, orig_code)
+            orig_itins = [it for it in ranked if it.origin == orig_code]
 
-        md.append("\n## 📊 Tabla Comparativa de las 10 Mejores Opciones de Vuelo\n")
-        md.append("| # | Ruta y Paradas | Días Viaje | Días Vacaciones | Precio Total | Puntuación IA |")
-        md.append("|---|----------------|:----------:|:---------------:|:------------:|:-------------:|")
-        for i, it in enumerate(ranked[:10], 1):
-            md.append(
-                f"| {i} | {it.route_summary} | {it.total_trip_days}d | {it.work_days_needed}d | {it.total_price_eur} € | **{it.ai_score}**/100 |"
-            )
+            flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
+            md.append(f"### {flag} Opciones desde {orig_name} ({orig_code})\n")
 
-        # Check if multiple return origin airports exist (e.g. TYO vs KIX/OSA)
+            md.append("| # | Ruta y Paradas | Fechas | Días Viaje | Días Vacaciones | Precio Total | Puntuación IA |")
+            md.append("|---|----------------|:------:|:----------:|:---------------:|:------------:|:-------------:|")
+            for i, it in enumerate(orig_itins[:15], 1):
+                md.append(
+                    f"| {i:2d} | {it.route_summary} | {it.start_date.strftime('%d/%m')} – {it.end_date.strftime('%d/%m')} | "
+                    f"{it.total_trip_days}d | {it.work_days_needed}d | **{self._format_price(it.total_price_eur)}** | **{it.ai_score}**/100 |"
+                )
+            md.append("")
+
+        # 4. Desglose Detallado de las Mejores Opciones (Estructura de Tarjetas Solicitada)
+        md.append("## 🏆 Desglose Detallado de las Mejores Opciones\n")
+        medals = ["🥇", "🥈", "🥉", "🏅"]
+
+        for orig_code in unique_origins:
+            orig_name = stop_names.get(orig_code, orig_code)
+            orig_itins = [it for it in ranked if it.origin == orig_code]
+
+            flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
+            md.append(f"### {flag} Las 4 Mejores Opciones desde {orig_name} ({orig_code})\n")
+
+            # Select the top 4 distinct itineraries for this origin
+            top_4 = orig_itins[:4]
+            for idx, it in enumerate(top_4, 1):
+                medal = medals[idx - 1] if idx <= len(medals) else "✈️"
+                card = self._format_itinerary_card(it, idx, medal, stop_names, dest_label)
+                md.append(card)
+                md.append("\n---\n")
+
+        # 5. Comparativa Multiciudad (Open-Jaw)
         return_origins = set()
         for it in ranked:
             if it.legs:
-                # Origin of return leg back to home origin
                 last_leg = it.legs[-1]
-                # If there was an inbound stopover, the return began at leg[-2].origin
                 return_city = it.legs[1].origin if len(it.legs) == 3 and "inbound" in it.itinerary_id else last_leg.origin
                 return_origins.add(return_city)
 
         if len(return_origins) > 1:
-            md.append("\n## 🔄 Comparativa de Ciudades de Regreso (Multiciudad / Open-Jaw)\n")
+            md.append("## 🔄 Comparativa de Ciudades de Regreso (Multiciudad / Open-Jaw)\n")
             for r_code in sorted(return_origins):
                 r_name = stop_names.get(r_code, r_code)
                 r_its = [
                     it for it in ranked
-                    if any(leg.origin == r_code and leg.destination == origin for leg in it.legs)
+                    if any(leg.origin == r_code and leg.destination in origins_list for leg in it.legs)
                     or (len(it.legs) == 3 and it.legs[1].origin == r_code)
                 ]
                 if r_its:
                     min_r = min(r_its, key=lambda x: x.total_price_eur)
                     md.append(
-                        f"- **Regreso por {r_name} ({r_code}):** Mejor precio total: `{min_r.total_price_eur} €` "
+                        f"- **Regreso por {r_name} ({r_code}):** Mejor precio total: `{self._format_price(min_r.total_price_eur)}` "
                         f"({min_r.route_summary})\n"
                     )
-            md.append(
-                "> **💡 Consejo de Viaje:** La ruta *Open-Jaw* (llegar a Tokio y volver por Osaka) te permite recorrer Japón linealmente "
-                "de este a oeste sin tener que gastar tiempo ni dinero en volver a Tokio en tren bala Shinkansen (ahorro adicional de ~100 €/persona)."
-            )
 
-        md.append("\n## 🧭 Desglose del Itinerario Recomendado\n")
-        for i, leg in enumerate(best_overall.legs, 1):
-            airlines = ", ".join(leg.airline_names) or "Línea Aérea"
-            md.append(f"### Tramo {i}: {leg.origin} ➔ {leg.destination}")
-            md.append(f"- **Fecha:** `{leg.departure_date}`")
-            md.append(f"- **Aerolíneas:** {airlines}")
-            md.append(f"- **Precio estimado:** `{leg.price_eur} €`")
-            if leg.booking_url:
-                md.append(f"- **Reserva / Consulta:** [Ver Vuelos en Google Flights]({leg.booking_url})")
+            open_jaw_note = ctx.get("open_jaw_strategy")
+            if open_jaw_note:
+                md.append(f"\n> **💡 Consejo Multiciudad:** {open_jaw_note}\n")
 
-        if best_overall.stopovers:
-            st = best_overall.stopovers[0]
-            md.append(f"\n### 💡 Consejos para la escala en {st.city_name} ({st.stay_days} días)")
-            md.append(
-                f"- **Fechas de escala:** Del `{st.arrival_date}` al `{st.departure_date}`.\n"
-                f"- **Logística:** Al ser una parada de {st.stay_days} días, tu equipaje de bodega se retira en {st.city_name} "
-                "para disfrutar cómodamente de la estancia en un hotel céntrico antes del siguiente vuelo.\n"
-                f"- **Ahorro & Experiencia:** Romper el vuelo largo no solo reduce la fatiga del viaje sino que te permite tachar "
-                f"{st.city_name} de tu lista de destinos por una fracción del coste de un viaje individual."
-            )
+        # 6. Consejos Logísticos de Stopover
+        md.append("## 💡 Consejos Logísticos para las Escalas Intermedias (Stopovers)\n")
+        md.append(
+            "- **Equipaje Facturado:** En escalas de 24h a 72h, tu equipaje de bodega se retira en el aeropuerto intermedio. "
+            "Te permite disponer cómodamente de tus pertenencias en el hotel céntrico antes del siguiente vuelo.\n"
+            "- **Salud & Descanso:** Romper un trayecto intercontinental largo divide el desfase horario y evita el agotamiento de vuelos seguidos de más de 12 horas.\n"
+            "- **Ahorro Estratégico:** Gracias a los acuerdos de conexión de aerolíneas puente (ej. Turkish, Arajet, Qatar, Air Europa), "
+            "añadir un destino intermedio resulta habitualmente más económico que comprar billetes punto a punto por separado.\n"
+        )
 
         return "\n".join(md)
+

@@ -56,11 +56,46 @@ class PTOAgent:
                 )
             ]
 
-        # Enrich summaries with Gemini if available
+        # Enrich summaries with Gemini if available, or generate detailed heuristic summary
         if self.llm.is_available:
             self._enrich_with_gemini(windows)
+        else:
+            self._enrich_heuristic(windows)
 
         return windows
+
+    def _enrich_heuristic(self, windows: List[PTOWindow]):
+        """Generates clear, informative heuristic summaries for each window."""
+        for w in windows:
+            if w.holidays_names:
+                h_str = ", ".join(w.holidays_names)
+                w.summary = (
+                    f"Aprovecha el festivo de {h_str} sumado a {w.weekend_days} días de fin de semana "
+                    f"para disfrutar {w.total_days} días pidiendo solo {w.work_days_needed} días de vacaciones"
+                )
+            else:
+                w.summary = (
+                    f"Ventana balanceada de {w.total_days} días con {w.weekend_days} días de fin de semana "
+                    f"usando {w.work_days_needed} días laborables"
+                )
+
+    def get_strategy_rationale(self, windows: List[PTOWindow]) -> str:
+        """Returns a clear explanation of why these windows were passed to the search engine."""
+        if not windows:
+            return "No se configuraron ventanas específicas de festivos."
+
+        best = max(windows, key=lambda w: w.efficiency_ratio)
+        holidays_all = set()
+        for w in windows:
+            holidays_all.update(w.holidays_names)
+
+        lines = [
+            f"- **Objetivo Calendario:** Maximizar los días naturales fuera de la oficina minimizando el consumo de vacaciones (PTO).",
+            f"- **Festivos Oficiales Detectados:** {', '.join(holidays_all) if holidays_all else 'Fines de semana estratégicos'} en {self.country} ({self.subdivision or 'Nacional'}).",
+            f"- **Rendimiento Máximo:** Hasta **{best.total_days} días de viaje** utilizando únicamente **{best.work_days_needed} días de vacaciones** (multiplicador de eficiencia **x{best.efficiency_ratio}**).",
+            f"- **Por qué se alimenta al motor de esta manera:** Permite a la combinatoria explorar fechas de salida en viernes o vísperas de festivo y regresos en domingo/festivo, reduciendo radicalmente el coste en días laborables y buscando tarifas más económicas con variaciones de ±1 a ±2 días.",
+        ]
+        return "\n".join(lines)
 
     def _enrich_with_gemini(self, windows: List[PTOWindow]):
         prompt = (
@@ -84,3 +119,6 @@ class PTOAgent:
         if res and "insights" in res and len(res["insights"]) == len(windows):
             for w, text in zip(windows, res["insights"]):
                 w.summary = f"{text} (Eficiencia x{w.efficiency_ratio})"
+        else:
+            self._enrich_heuristic(windows)
+
