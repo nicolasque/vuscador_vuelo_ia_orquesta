@@ -287,3 +287,41 @@ def test_combinator_with_mixed_origin_and_return_cities():
     assert len(bio_to_bio) > 0, "Should generate standard BIO -> ... -> BIO routes"
 
 
+def test_combinator_with_allowed_scenarios():
+    window = PTOWindow(
+        start_date=date(2027, 3, 13),
+        end_date=date(2027, 4, 4),
+        total_days=23,
+        work_days_needed=11,
+        weekend_days=8,
+        holiday_days=4,
+        efficiency_ratio=2.59,
+    )
+
+    combinator = RouteCombinator(
+        origins=["MAD", "BIO"],
+        destinations=["TYO"],
+        return_destinations=["TYO", "OSA"],
+        return_arrivals=["MAD", "BIO"],
+        candidate_windows=[window],
+        candidate_stopovers=["IST"],
+        min_stopover_days=2,
+        max_stopover_days=2,
+        include_dual_stopovers=False,
+        allowed_scenarios=[("BIO", "BIO"), ("MAD", "MAD"), ("MAD", "BIO")],
+    )
+
+    blueprints, tasks = combinator.generate_blueprints()
+
+    bio_to_bio = [b for b in blueprints if b.origin == "BIO" and b.leg_keys[-1][1] == "BIO"]
+    mad_to_mad = [b for b in blueprints if b.origin == "MAD" and b.leg_keys[-1][1] == "MAD"]
+    mad_to_bio = [b for b in blueprints if b.origin == "MAD" and b.leg_keys[-1][1] == "BIO"]
+    bio_to_mad = [b for b in blueprints if b.origin == "BIO" and b.leg_keys[-1][1] == "MAD"]
+
+    assert len(bio_to_bio) > 0
+    assert len(mad_to_mad) > 0
+    assert len(mad_to_bio) > 0
+    assert len(bio_to_mad) == 0, "BIO -> ... -> MAD must be excluded by allowed_scenarios"
+
+
+

@@ -172,3 +172,81 @@ def test_synthesis_agent_multi_origin_report_with_links():
     assert "Las 4 Mejores Opciones desde Bilbao (BIO)" in report
     assert "https://www.google.com/travel/flights?q=one-way+flights+from+MAD+to+SDQ" in report
     assert "Shinkansen" not in report  # Verified: no hardcoded Japan text for Colombia
+
+
+def test_synthesis_agent_with_deterministic_curator_on_large_query():
+    """Verifies that for large itinerary datasets (>= activation_threshold),
+    SynthesisAgent triggers DeterministicCurator and embeds exact market statistics
+    and balanced diversity in the executive report.
+    """
+    from tests.test_curator import make_mock_itinerary
+    import random
+    random.seed(99)
+
+    origins = ["MAD", "BIO"]
+    destinations = ["TYO", "OSA", "FUK"]
+    hubs = ["IST", "ICN", "SIN", "BKK", "HAN", "HKG"]
+
+    large_itins = []
+    for i in range(250):
+        orig = random.choice(origins)
+        ret_arr = random.choice(origins)
+        dest = random.choice(destinations)
+        hub = random.choice(hubs)
+        price = round(random.uniform(900.0, 1800.0), 2)
+        score = round(random.uniform(70.0, 95.0), 1)
+        pto = round(random.uniform(1.8, 2.8), 2)
+        large_itins.append(make_mock_itinerary(f"it_{i}", orig, dest, ret_arr, price, score, pto, hub))
+
+    agent = SynthesisAgent()
+    assert agent.curator.is_applicable(len(large_itins))
+
+    report = agent.generate_final_report(
+        origin="MAD, BIO",
+        destination="TYO, OSA",
+        itineraries=large_itins,
+        candidate_stopover_names={"MAD": "Madrid", "BIO": "Bilbao", "TYO": "Tokio", "OSA": "Osaka", "IST": "Estambul"},
+        search_context={
+            "origins": ["MAD", "BIO"],
+            "destinations": ["TYO", "OSA"],
+            "pto_strategy": "Optimización Semana Santa",
+        },
+    )
+
+    # Verify that deterministic market stats section was rendered
+    assert "Análisis Determinista y Estadísticas de Mercado" in report
+    assert "250 itinerarios reales" in report
+    assert "Rango global de mercado:" in report
+    assert "Precio mediano:" in report
+    assert "Las 4 Mejores Opciones desde Madrid (MAD)" in report
+    assert "Las 4 Mejores Opciones desde Bilbao (BIO)" in report
+
+
+def test_synthesis_agent_with_allowed_scenarios():
+    from tests.test_curator import make_mock_itinerary
+
+    itins = [
+        make_mock_itinerary("it_bio", "BIO", "TYO", "BIO", 1100.0, 85.0, 2.4, "IST"),
+        make_mock_itinerary("it_mad", "MAD", "TYO", "MAD", 950.0, 90.0, 2.4, "IST"),
+        make_mock_itinerary("it_mix", "MAD", "TYO", "BIO", 980.0, 88.0, 2.4, "IST"),
+    ]
+
+    agent = SynthesisAgent()
+    report = agent.generate_final_report(
+        origin="MAD, BIO",
+        destination="TYO, OSA",
+        itineraries=itins,
+        candidate_stopover_names={"MAD": "Madrid", "BIO": "Bilbao", "TYO": "Tokio", "OSA": "Osaka", "IST": "Estambul"},
+        search_context={
+            "origins": ["MAD", "BIO"],
+            "destinations": ["TYO", "OSA"],
+            "allowed_scenarios": [("BIO", "BIO"), ("MAD", "MAD"), ("MAD", "BIO")],
+            "pto_strategy": "Optimización Semana Santa",
+        },
+    )
+
+    assert "BIO ➔ BIO" in report
+    assert "MAD ➔ MAD" in report
+    assert "MAD ➔ BIO" in report
+    assert "Ruta Mixta" in report
+

@@ -4,13 +4,19 @@ from typing import List, Optional, Dict, Any
 from urllib.parse import quote
 from vusca.models.flight import Itinerary
 from vusca.agents.llm_client import GeminiClient
+from vusca.core.curator import DeterministicCurator, CuratedArchetypes
 
 
 class SynthesisAgent:
     """Agent that analyzes, scores, and synthesizes final flight search results."""
 
-    def __init__(self, llm_client: Optional[GeminiClient] = None):
+    def __init__(
+        self,
+        llm_client: Optional[GeminiClient] = None,
+        curator: Optional[DeterministicCurator] = None,
+    ):
         self.llm = llm_client or GeminiClient()
+        self.curator = curator or DeterministicCurator(activation_threshold=100)
 
     def evaluate_and_rank(
         self,
@@ -84,19 +90,30 @@ class SynthesisAgent:
         ctx = search_context or {}
         priority = ctx.get("priority", "balanced")
         ranked = self.evaluate_and_rank(itineraries, priority=priority)
-        best_overall = ranked[0]
-        cheapest = min(ranked, key=lambda it: it.total_price_eur)
-        best_pto = max(ranked, key=lambda it: it.pto_efficiency_ratio)
+
+        # Deterministic reduction for large datasets
+        curated_data: Optional[CuratedArchetypes] = None
+        if self.curator.is_applicable(len(ranked)):
+            curated_data = self.curator.curate(
+                ranked,
+                target_origins=ctx.get("origins"),
+                target_destinations=ctx.get("destinations"),
+                max_selection_size=20,
+            )
+
+        best_overall = curated_data.best_overall if (curated_data and curated_data.best_overall) else ranked[0]
+        cheapest = curated_data.cheapest_overall if (curated_data and curated_data.cheapest_overall) else min(ranked, key=lambda it: it.total_price_eur)
+        best_pto = curated_data.best_pto_overall if (curated_data and curated_data.best_pto_overall) else max(ranked, key=lambda it: it.pto_efficiency_ratio)
 
         if self.llm.is_available:
             ai_report = self._generate_with_gemini(
-                origin, destination, ranked, best_overall, cheapest, best_pto, candidate_stopover_names, ctx
+                origin, destination, ranked, best_overall, cheapest, best_pto, candidate_stopover_names, ctx, curated_data=curated_data
             )
             if ai_report:
                 return ai_report
 
         return self._generate_heuristic_report(
-            origin, destination, ranked, best_overall, cheapest, best_pto, candidate_stopover_names, ctx
+            origin, destination, ranked, best_overall, cheapest, best_pto, candidate_stopover_names, ctx, curated_data=curated_data
         )
 
     @staticmethod
@@ -104,6 +121,7 @@ class SynthesisAgent:
         ranked: List[Itinerary],
         origins_list: List[str],
         limit_per_origin: int = 4,
+        curated_selection: Optional[List[Itinerary]] = None,
     ) -> Dict[str, List[Itinerary]]:
         """Selects diverse, top-scoring itineraries for each origin airport."""
         target_origins = [o for o in origins_list if any(it.origin == o for it in ranked)] or list(dict.fromkeys([it.origin for it in ranked]))
@@ -114,15 +132,28 @@ class SynthesisAgent:
             selected = []
             seen_routes = set()
 
+            # Pass 0: Seed with curated diverse champions if available
+            if curated_selection:
+                for it in curated_selection:
+                    if it.origin == orig_code:
+                        ret_arr = it.legs[-1].destination if it.legs else it.origin
+                        sig = (it.final_destination, ret_arr, tuple(s.city_code for s in it.stopovers))
+                        if sig not in seen_routes:
+                            seen_routes.add(sig)
+                            selected.append(it)
+                        if len(selected) == limit_per_origin:
+                            break
+
             # Pass 1: Distinct route signatures (dest + return arrival + stopover sequence)
-            for it in orig_itins:
-                ret_arr = it.legs[-1].destination if it.legs else it.origin
-                sig = (it.final_destination, ret_arr, tuple(s.city_code for s in it.stopovers))
-                if sig not in seen_routes:
-                    seen_routes.add(sig)
-                    selected.append(it)
-                if len(selected) == limit_per_origin:
-                    break
+            if len(selected) < limit_per_origin:
+                for it in orig_itins:
+                    ret_arr = it.legs[-1].destination if it.legs else it.origin
+                    sig = (it.final_destination, ret_arr, tuple(s.city_code for s in it.stopovers))
+                    if sig not in seen_routes:
+                        seen_routes.add(sig)
+                        selected.append(it)
+                    if len(selected) == limit_per_origin:
+                        break
 
             # Pass 2: Fill up to limit_per_origin with remaining top-scoring options
             if len(selected) < limit_per_origin:
@@ -136,6 +167,70 @@ class SynthesisAgent:
 
         return options_by_orig
 
+    @staticmethod
+    def _get_options_by_scenario(
+        ranked: List[Itinerary],
+        scenarios_list: Optional[List[Tuple[str, str]]] = None,
+        limit_per_scenario: int = 4,
+        curated_selection: Optional[List[Itinerary]] = None,
+    ) -> Dict[Tuple[str, str], List[Itinerary]]:
+        """Selects diverse, top-scoring itineraries for each route scenario (origin, return_arrival)."""
+        if scenarios_list:
+            target_scenarios = [
+                s for s in scenarios_list
+                if any((it.origin == s[0] and (it.legs[-1].destination if it.legs else it.origin) == s[1]) for it in ranked)
+            ]
+        else:
+            target_scenarios = list(dict.fromkeys([
+                (it.origin, it.legs[-1].destination if it.legs else it.origin) for it in ranked
+            ]))
+
+        options_by_scen: Dict[Tuple[str, str], List[Itinerary]] = {}
+
+        for scen in target_scenarios:
+            orig_code, ret_code = scen
+            scen_itins = [
+                it for it in ranked
+                if it.origin == orig_code and (it.legs[-1].destination if it.legs else it.origin) == ret_code
+            ]
+            selected = []
+            seen_routes = set()
+
+            # Pass 0: Seed with curated diverse champions
+            if curated_selection:
+                for it in curated_selection:
+                    it_ret = it.legs[-1].destination if it.legs else it.origin
+                    if it.origin == orig_code and it_ret == ret_code:
+                        sig = (it.final_destination, it_ret, tuple(s.city_code for s in it.stopovers))
+                        if sig not in seen_routes:
+                            seen_routes.add(sig)
+                            selected.append(it)
+                        if len(selected) == limit_per_scenario:
+                            break
+
+            # Pass 1: Distinct route signatures (dest + return arrival + stopover sequence)
+            if len(selected) < limit_per_scenario:
+                for it in scen_itins:
+                    it_ret = it.legs[-1].destination if it.legs else it.origin
+                    sig = (it.final_destination, it_ret, tuple(s.city_code for s in it.stopovers))
+                    if sig not in seen_routes:
+                        seen_routes.add(sig)
+                        selected.append(it)
+                    if len(selected) == limit_per_scenario:
+                        break
+
+            # Pass 2: Fill up to limit with remaining top-scoring options
+            if len(selected) < limit_per_scenario:
+                for it in scen_itins:
+                    if it not in selected:
+                        selected.append(it)
+                    if len(selected) == limit_per_scenario:
+                        break
+
+            options_by_scen[scen] = selected
+
+        return options_by_scen
+
     def _generate_with_gemini(
         self,
         origin: str,
@@ -146,6 +241,7 @@ class SynthesisAgent:
         best_pto: Itinerary,
         candidate_stopover_names: Dict[str, str],
         context: Dict[str, Any],
+        curated_data: Optional[CuratedArchetypes] = None,
     ) -> Optional[str]:
         origins_list = context.get("origins") or [o.strip() for o in origin.split(",") if o.strip()]
         destinations_list = context.get("destinations") or [d.strip() for d in destination.split(",") if d.strip()]
@@ -159,26 +255,63 @@ class SynthesisAgent:
             f"- Justificación de hubs y paradas: {context.get('hub_strategy', 'Escalas estratégicas de 1-3 días en hubs con stopover')}\n"
             f"- Justificación Multiciudad (Open-Jaw): {context.get('open_jaw_strategy', 'Rutas lineales sin retroceder')}\n"
             f"- Restricciones de confort: Máximo 1 escala de conexión por tramo de billete, máximo 2 escalas totales por sentido.\n\n"
+        )
+
+        if curated_data and curated_data.market_stats:
+            m_stats = curated_data.market_stats
+            prompt += (
+                f"RESUMEN ESTADÍSTICO DEL MERCADO ({curated_data.total_evaluated:,} combinaciones reales analizadas deterministamente):\n"
+                f"- Rango global de precios: {m_stats.get('price_min')}€ - {m_stats.get('price_max')}€ "
+                f"(Mediana: {m_stats.get('price_median')}€ | Media: {m_stats.get('price_mean')}€)\n"
+                f"- Precios mínimos por Escenario: {dict(m_stats.get('scenario_min_prices', {}))}\n"
+                f"- Precios mínimos por Hub: {dict(m_stats.get('hub_min_prices', {}))}\n"
+                f"- Precios mínimos por Destino: {dict(m_stats.get('destination_min_prices', {}))}\n\n"
+            )
+
+        prompt += (
             f"DATOS DE LAS MEJORES OPCIONES ENCONTRADAS ({len(ranked)} evaluadas):\n"
             f"- GANADOR GLOBAL: {best_overall.route_summary} | {best_overall.total_price_eur}€ | {best_overall.total_trip_days}d ({best_overall.work_days_needed} PTO)\n"
             f"- MÁS ECONÓMICA: {cheapest.route_summary} | {cheapest.total_price_eur}€ | {cheapest.total_trip_days}d ({cheapest.work_days_needed} PTO)\n"
             f"- MÁXIMA EFICIENCIA PTO: {best_pto.route_summary} | Ratio x{best_pto.pto_efficiency_ratio} | {best_pto.total_trip_days}d ({best_pto.work_days_needed} PTO)\n\n"
         )
 
-        options_by_origin = self._get_options_by_origin(ranked, origins_list, limit_per_origin=4)
+        curated_sel = curated_data.curated_selection if curated_data else None
+        allowed_scenarios = context.get("allowed_scenarios")
+        use_scenario_view = bool(allowed_scenarios)
 
-        prompt += "OPCIONES SELECCIONADAS POR AEROPUERTO DE ORIGEN:\n"
-        for orig_code, itins in options_by_origin.items():
-            orig_name = candidate_stopover_names.get(orig_code, orig_code)
-            prompt += f"\n=== {orig_name} ({orig_code}): {len(itins)} Mejores Opciones ===\n"
-            for idx, it in enumerate(itins, 1):
-                prompt += f"\nOpción {idx} desde {orig_name} ({it.ai_score}/100) - {it.route_summary} - Total: {it.total_price_eur}€ - {it.total_trip_days} días ({it.work_days_needed}d PTO):\n"
-                for leg in it.legs:
-                    carriers = ", ".join(leg.airline_names) or "Aerolínea"
-                    prompt += (
-                        f"    * Tramo {leg.origin} -> {leg.destination} ({leg.departure_date}): "
-                        f"{leg.price_eur}€ con {carriers} ({leg.stops_count} escalas) | Link: {leg.flight_search_url}\n"
-                    )
+        if use_scenario_view:
+            options_by_scen = self._get_options_by_scenario(
+                ranked, scenarios_list=allowed_scenarios, limit_per_scenario=4, curated_selection=curated_sel
+            )
+            prompt += "OPCIONES SELECCIONADAS POR ESCENARIO DE RUTA:\n"
+            for scen, itins in options_by_scen.items():
+                orig_code, ret_code = scen
+                orig_name = candidate_stopover_names.get(orig_code, orig_code)
+                ret_name = candidate_stopover_names.get(ret_code, ret_code)
+                scen_label = f"{orig_name} -> {ret_name} ({orig_code} -> {ret_code})"
+                prompt += f"\n=== {scen_label}: {len(itins)} Mejores Opciones ===\n"
+                for idx, it in enumerate(itins, 1):
+                    prompt += f"\nOpción {idx} para {scen_label} ({it.ai_score}/100) - {it.route_summary} - Total: {it.total_price_eur}€ - {it.total_trip_days} días ({it.work_days_needed}d PTO):\n"
+                    for leg in it.legs:
+                        carriers = ", ".join(leg.airline_names) or "Aerolínea"
+                        prompt += (
+                            f"    * Tramo {leg.origin} -> {leg.destination} ({leg.departure_date}): "
+                            f"{leg.price_eur}€ con {carriers} ({leg.stops_count} escalas) | Link: {leg.flight_search_url}\n"
+                        )
+        else:
+            options_by_origin = self._get_options_by_origin(ranked, origins_list, limit_per_origin=4, curated_selection=curated_sel)
+            prompt += "OPCIONES SELECCIONADAS POR AEROPUERTO DE ORIGEN:\n"
+            for orig_code, itins in options_by_origin.items():
+                orig_name = candidate_stopover_names.get(orig_code, orig_code)
+                prompt += f"\n=== {orig_name} ({orig_code}): {len(itins)} Mejores Opciones ===\n"
+                for idx, it in enumerate(itins, 1):
+                    prompt += f"\nOpción {idx} desde {orig_name} ({it.ai_score}/100) - {it.route_summary} - Total: {it.total_price_eur}€ - {it.total_trip_days} días ({it.work_days_needed}d PTO):\n"
+                    for leg in it.legs:
+                        carriers = ", ".join(leg.airline_names) or "Aerolínea"
+                        prompt += (
+                            f"    * Tramo {leg.origin} -> {leg.destination} ({leg.departure_date}): "
+                            f"{leg.price_eur}€ con {carriers} ({leg.stops_count} escalas) | Link: {leg.flight_search_url}\n"
+                        )
 
         prompt += (
             "\nESTRUCTURA OBLIGATORIA DEL INFORME:\n"
@@ -368,6 +501,7 @@ class SynthesisAgent:
         best_pto: Itinerary,
         candidate_stopover_names: Optional[Dict[str, str]] = None,
         context: Optional[Dict[str, Any]] = None,
+        curated_data: Optional[CuratedArchetypes] = None,
     ) -> str:
         stop_names = candidate_stopover_names or {}
         ctx = context or {}
@@ -452,40 +586,110 @@ class SynthesisAgent:
             f"- **Eficiencia de búsqueda:** Se evaluaron **{tot_bp} itinerarios combinatorios**, podados algorítmicamente a **{tot_tasks} consultas atómicas** para proteger la cuota de la API y garantizar datos frescos.\n"
         )
 
-        options_by_origin = self._get_options_by_origin(ranked, origins_list, limit_per_origin=4)
+        if curated_data and curated_data.market_stats:
+            m_stats = curated_data.market_stats
+            md.append("### 📈 5. Análisis Determinista y Estadísticas de Mercado (Reducción Pareto)")
+            md.append(
+                f"- **Volumen evaluado:** Se procesaron y puntuaron **{curated_data.total_evaluated:,} itinerarios reales** de forma determinista.\n"
+                f"- **Rango global de mercado:** desde **{self._format_price(m_stats['price_min'])}** hasta **{self._format_price(m_stats['price_max'])}** "
+                f"(Precio mediano: **{self._format_price(m_stats['price_median'])}** | Media: **{self._format_price(m_stats['price_mean'])}**).\n"
+            )
+            if m_stats.get("scenario_min_prices"):
+                scen_str = ", ".join([f"{scen}: **{self._format_price(pr)}**" for scen, pr in m_stats["scenario_min_prices"].items()])
+                md.append(f"- **Tarifas mínimas por combinación origen-regreso:** {scen_str}.\n")
+            if m_stats.get("hub_min_prices"):
+                top_hubs = sorted(m_stats["hub_min_prices"].items(), key=lambda x: x[1])[:6]
+                hub_str = ", ".join([f"{h}: **{self._format_price(pr)}**" for h, pr in top_hubs])
+                md.append(f"- **Hubs más económicos encontrados:** {hub_str}.\n")
 
-        # 3. Cuadro Ampliado de Posibilidades (Tabla Grande Reducida)
-        md.append("## 📊 Cuadro Ampliado de Posibilidades (Comparativa de Opciones)\n")
-        for orig_code in options_by_origin.keys():
-            orig_name = stop_names.get(orig_code, orig_code)
-            orig_itins = [it for it in ranked if it.origin == orig_code]
+        curated_sel = curated_data.curated_selection if curated_data else None
+        allowed_scenarios = ctx.get("allowed_scenarios")
+        use_scenario_view = bool(allowed_scenarios)
 
-            flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
-            md.append(f"### {flag} Opciones desde {orig_name} ({orig_code})\n")
+        if use_scenario_view:
+            options_by_scenario = self._get_options_by_scenario(
+                ranked, scenarios_list=allowed_scenarios, limit_per_scenario=4, curated_selection=curated_sel
+            )
 
-            md.append("| # | Ruta y Paradas | Fechas | Días Viaje | Días Vacaciones | Precio Total | Puntuación IA |")
-            md.append("|---|----------------|:------:|:----------:|:---------------:|:------------:|:-------------:|")
-            for i, it in enumerate(orig_itins[:15], 1):
-                md.append(
-                    f"| {i:2d} | {it.route_summary} | {it.start_date.strftime('%d/%m')} – {it.end_date.strftime('%d/%m')} | "
-                    f"{it.total_trip_days}d | {it.work_days_needed}d | **{self._format_price(it.total_price_eur)}** | **{it.ai_score}**/100 |"
-                )
-            md.append("")
+            # 3. Cuadro Ampliado de Posibilidades (Tabla Grande Reducida)
+            md.append("## 📊 Cuadro Ampliado de Posibilidades (Comparativa de Opciones)\n")
+            for scen, top_4 in options_by_scenario.items():
+                orig_code, ret_code = scen
+                orig_name = stop_names.get(orig_code, orig_code)
+                ret_name = stop_names.get(ret_code, ret_code)
+                scen_itins = [
+                    it for it in ranked
+                    if it.origin == orig_code and (it.legs[-1].destination if it.legs else it.origin) == ret_code
+                ]
+                flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
+                if orig_code == ret_code:
+                    md.append(f"### {flag} Opciones {orig_name} ➔ {dest_label} ➔ {orig_name} ({orig_code} ➔ {orig_code})\n")
+                else:
+                    md.append(f"### 🔄 Ruta Mixta Interciudad: {orig_name} ➔ {dest_label} ➔ {ret_name} ({orig_code} ➔ {ret_code})\n")
 
-        # 4. Desglose Detallado de las Mejores Opciones (Estructura de Tarjetas Solicitada)
-        md.append("## 🏆 Desglose Detallado de las Mejores Opciones\n")
-        medals = ["🥇", "🥈", "🥉", "🏅"]
+                md.append("| # | Ruta y Paradas | Fechas | Días Viaje | Días Vacaciones | Precio Total | Puntuación IA |")
+                md.append("|---|----------------|:------:|:----------:|:---------------:|:------------:|:-------------:|")
+                for i, it in enumerate(scen_itins[:15], 1):
+                    md.append(
+                        f"| {i:2d} | {it.route_summary} | {it.start_date.strftime('%d/%m')} – {it.end_date.strftime('%d/%m')} | "
+                        f"{it.total_trip_days}d | {it.work_days_needed}d | **{self._format_price(it.total_price_eur)}** | **{it.ai_score}**/100 |"
+                    )
+                md.append("")
 
-        for orig_code, top_4 in options_by_origin.items():
-            orig_name = stop_names.get(orig_code, orig_code)
-            flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
-            md.append(f"### {flag} Las 4 Mejores Opciones desde {orig_name} ({orig_code})\n")
+            # 4. Desglose Detallado de las Mejores Opciones (Estructura de Tarjetas Solicitada)
+            md.append("## 🏆 Desglose Detallado de las Mejores Opciones\n")
+            medals = ["🥇", "🥈", "🥉", "🏅"]
 
-            for idx, it in enumerate(top_4, 1):
-                medal = medals[idx - 1] if idx <= len(medals) else "✈️"
-                card = self._format_itinerary_card(it, idx, medal, stop_names, dest_label)
-                md.append(card)
-                md.append("\n---\n")
+            for scen, top_4 in options_by_scenario.items():
+                orig_code, ret_code = scen
+                orig_name = stop_names.get(orig_code, orig_code)
+                ret_name = stop_names.get(ret_code, ret_code)
+                flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
+                if orig_code == ret_code:
+                    md.append(f"### {flag} Las 4 Mejores Opciones: {orig_name} ➔ {dest_label} ➔ {orig_name} ({orig_code} ➔ {orig_code})\n")
+                else:
+                    md.append(f"### 🔄 Las 4 Mejores Opciones: Ruta Mixta {orig_name} ➔ {dest_label} ➔ {ret_name} ({orig_code} ➔ {ret_code})\n")
+
+                for idx, it in enumerate(top_4, 1):
+                    medal = medals[idx - 1] if idx <= len(medals) else "✈️"
+                    card = self._format_itinerary_card(it, idx, medal, stop_names, dest_label)
+                    md.append(card)
+                    md.append("\n---\n")
+        else:
+            options_by_origin = self._get_options_by_origin(ranked, origins_list, limit_per_origin=4, curated_selection=curated_sel)
+
+            # 3. Cuadro Ampliado de Posibilidades (Tabla Grande Reducida)
+            md.append("## 📊 Cuadro Ampliado de Posibilidades (Comparativa de Opciones)\n")
+            for orig_code in options_by_origin.keys():
+                orig_name = stop_names.get(orig_code, orig_code)
+                orig_itins = [it for it in ranked if it.origin == orig_code]
+
+                flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
+                md.append(f"### {flag} Opciones desde {orig_name} ({orig_code})\n")
+
+                md.append("| # | Ruta y Paradas | Fechas | Días Viaje | Días Vacaciones | Precio Total | Puntuación IA |")
+                md.append("|---|----------------|:------:|:----------:|:---------------:|:------------:|:-------------:|")
+                for i, it in enumerate(orig_itins[:15], 1):
+                    md.append(
+                        f"| {i:2d} | {it.route_summary} | {it.start_date.strftime('%d/%m')} – {it.end_date.strftime('%d/%m')} | "
+                        f"{it.total_trip_days}d | {it.work_days_needed}d | **{self._format_price(it.total_price_eur)}** | **{it.ai_score}**/100 |"
+                    )
+                md.append("")
+
+            # 4. Desglose Detallado de las Mejores Opciones (Estructura de Tarjetas Solicitada)
+            md.append("## 🏆 Desglose Detallado de las Mejores Opciones\n")
+            medals = ["🥇", "🥈", "🥉", "🏅"]
+
+            for orig_code, top_4 in options_by_origin.items():
+                orig_name = stop_names.get(orig_code, orig_code)
+                flag = "🇪🇸" if orig_code in ("MAD", "BIO", "BCN", "VLC", "AGP") else "🛫"
+                md.append(f"### {flag} Las 4 Mejores Opciones desde {orig_name} ({orig_code})\n")
+
+                for idx, it in enumerate(top_4, 1):
+                    medal = medals[idx - 1] if idx <= len(medals) else "✈️"
+                    card = self._format_itinerary_card(it, idx, medal, stop_names, dest_label)
+                    md.append(card)
+                    md.append("\n---\n")
 
         # 5. Comparativa Multiciudad (Open-Jaw)
         return_origins = set()

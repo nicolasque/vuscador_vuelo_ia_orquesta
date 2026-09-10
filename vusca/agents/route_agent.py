@@ -230,13 +230,41 @@ GLOBAL_HUBS: Dict[str, Dict[str, str]] = {
         "airline": "TAP Air Portugal",
         "description": "Riberas del Duero, bodegas de vino y conexión directa de TAP hacia Brasil con stopover gratuito.",
     },
+    "LHR": {
+        "name": "Londres Heathrow",
+        "country": "Reino Unido",
+        "corridors": ["EUROPE_ASIA", "EUROPE_AMERICA"],
+        "airline": "British Airways / JAL",
+        "description": "Gran megahub europeo con múltiples vuelos diarios directos a Tokio Haneda operados por British Airways y Japan Airlines.",
+    },
+    "VIE": {
+        "name": "Viena",
+        "country": "Austria",
+        "corridors": ["EUROPE_ASIA"],
+        "airline": "Austrian Airlines",
+        "description": "Hub centroeuropeo elegante y eficiente con conexiones directas a Tokio Narita (Star Alliance).",
+    },
+    "BRU": {
+        "name": "Bruselas",
+        "country": "Bélgica",
+        "corridors": ["EUROPE_ASIA", "EUROPE_AFRICA"],
+        "airline": "Brussels Airlines / ANA",
+        "description": "Conexión directa desde Bilbao y vuelo directo intercontinental a Tokio Narita operado por ANA (All Nippon Airways).",
+    },
+    "MXP": {
+        "name": "Milán Malpensa",
+        "country": "Italia",
+        "corridors": ["EUROPE_ASIA"],
+        "airline": "ANA / ITA",
+        "description": "Gran hub del norte de Italia con enlace directo a Tokio Haneda operado por ANA (All Nippon Airways).",
+    },
 }
 
 HUB_PRESETS: Dict[str, List[str]] = {
     "asia_top": ["BKK", "SIN", "ICN", "DOH", "IST"],
     "asia_full": ["BKK", "SIN", "KUL", "ICN", "TPE", "HKG", "HAN", "SGN", "DOH", "DXB", "IST"],
     "gulf": ["DOH", "DXB", "AUH", "IST"],
-    "europe": ["IST", "HEL", "FRA", "MUC", "CDG", "AMS", "FCO", "ZRH"],
+    "europe": ["FRA", "MUC", "CDG", "AMS", "IST", "HEL", "ZRH", "LHR"],
     "all_asia": ["BKK", "SIN", "KUL", "ICN", "TPE", "HKG", "DOH", "DXB", "AUH", "IST"],
     "istanbul": ["IST"],
     "brasil": ["LIS", "CMN", "FCO"],

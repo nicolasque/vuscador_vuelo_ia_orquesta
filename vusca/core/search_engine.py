@@ -43,11 +43,13 @@ class SearchEngine:
         progress_callback: Optional[Callable[[SearchLegTask, int, int], None]] = None,
         max_scales_per_direction: int = 2,
         max_stops_per_leg: int = 1,
+        cache_only: bool = False,
     ) -> List[Itinerary]:
         """
         Executes all pending tasks in the job.
         Can resume jobs that were previously paused or partially completed.
         Supports concurrent execution when concurrency > 1.
+        If cache_only is True, skips external API calls and strictly uses existing DB cache.
         """
         job.status = JobStatus.IN_PROGRESS
         job.update_progress()
@@ -76,6 +78,18 @@ class SearchEngine:
                     if current % 20 == 0:
                         job.update_progress()
                         self.db.save_job(job)
+                    if progress_callback:
+                        progress_callback(task, current, total)
+                return
+
+            # If cache_only is enabled, skip external queries immediately without network errors
+            if cache_only:
+                task.status = "NOT_IN_CACHE"
+                task.provider_name = "SQLite DB"
+                task.results_count = 0
+                with self._lock:
+                    self._completed_count += 1
+                    current = self._completed_count
                     if progress_callback:
                         progress_callback(task, current, total)
                 return
@@ -144,7 +158,8 @@ class SearchEngine:
             max_scales_per_direction=max_scales_per_direction,
             max_stops_per_leg=max_stops_per_leg,
         )
-        job.itineraries = itineraries
+        # Store a curated subset in the SQLite job record to avoid blob size limits
+        job.itineraries = itineraries[:500] if len(itineraries) > 500 else itineraries
         job.status = JobStatus.COMPLETED
         job.update_progress()
         self.db.save_job(job)

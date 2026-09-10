@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-vusca_cache.db
+vusca_cache.db*
+*.db
+*.db-*
+*.bak
+.DS_Store
 .env
 reporte_*.md
 *.egg-info/

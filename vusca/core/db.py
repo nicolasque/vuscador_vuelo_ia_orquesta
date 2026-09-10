@@ -120,7 +120,13 @@ class DatabaseManager:
     # -------------------------------------------------------------
     def save_job(self, job: SearchJob):
         job.updated_at = now_utc()
-        job_data_json = job.model_dump_json()
+        saved_itins = job.itineraries
+        if len(job.itineraries) > 500:
+            job.itineraries = job.itineraries[:500]
+        try:
+            job_data_json = job.model_dump_json()
+        finally:
+            job.itineraries = saved_itins
 
         with self._get_connection() as conn:
             cursor = conn.cursor()

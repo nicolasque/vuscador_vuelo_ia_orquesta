@@ -62,6 +62,7 @@ class RouteCombinator:
         outbound_stopovers: Optional[List[str]] = None,
         return_stopovers: Optional[List[str]] = None,
         include_dual_stopovers: bool = True,
+        allowed_scenarios: Optional[List[Tuple[str, str]]] = None,
     ):
         # Resolve origins (accepting both origins and origin)
         raw_origins = origins if origins is not None else origin
@@ -116,6 +117,7 @@ class RouteCombinator:
             self.return_stopovers = list(self.candidate_stopovers)
 
         self.include_dual_stopovers = include_dual_stopovers
+        self.allowed_scenarios = set(allowed_scenarios) if allowed_scenarios else None
 
     def generate_blueprints(self) -> Tuple[List[RouteBlueprint], List[SearchLegTask]]:
         """
@@ -146,6 +148,8 @@ class RouteCombinator:
                     for ret_orig in self.return_destinations:
                         ret_dest_candidates = self.return_arrivals if self.return_arrivals else [orig]
                         for ret_dest in ret_dest_candidates:
+                            if self.allowed_scenarios and (orig, ret_dest) not in self.allowed_scenarios:
+                                continue
                             is_open_jaw = (ret_orig != dest) or (ret_dest != orig)
 
                             # 1. Baseline Route (orig -> dest | Return: ret_orig -> ret_dest)
@@ -411,25 +415,39 @@ class RouteCombinator:
         """
         itineraries: List[Itinerary] = []
 
+        direction_cache: Dict[Tuple[Tuple[Tuple[str, str, str], ...], bool], Optional[List[FlightLegOffer]]] = {}
+
         def find_cheapest_valid_direction(
             keys: List[Tuple[str, str, date]],
             has_stopover: bool,
         ) -> Optional[List[FlightLegOffer]]:
+            cache_key = (tuple((orig, dest, d.isoformat()) for orig, dest, d in keys), has_stopover)
+            if cache_key in direction_cache:
+                return direction_cache[cache_key]
+
             candidates_list = []
             for orig, dest, d in keys:
                 key = f"{orig.upper()}:{dest.upper()}:{d.isoformat()}"
                 offs = offers_by_key.get(key, [])
                 if not offs:
+                    direction_cache[cache_key] = None
                     return None
                 # Filter out offers where stops_count > max_stops_per_leg (default 1)
                 # Any flight leg between origin, central stopover and destination must have at most 1 connection!
                 valid_offs = [o for o in offs if o.stops_count <= max_stops_per_leg]
                 if not valid_offs:
+                    direction_cache[cache_key] = None
                     return None
-                # Sort candidate offers: prefer lower price, then fewer stops, then shorter duration
-                candidates_list.append(
-                    sorted(valid_offs, key=lambda o: (o.price_eur, o.stops_count, o.total_duration_minutes or 9999))
+                # Partition valid offers by stop count to guarantee the global optimum is preserved
+                # under any total_scales constraint (0-stop vs 1-stop trade-offs)
+                offs_0_stop = sorted([o for o in valid_offs if o.stops_count == 0], key=lambda o: (o.price_eur, o.total_duration_minutes or 9999))
+                offs_1_stop = sorted([o for o in valid_offs if o.stops_count == 1], key=lambda o: (o.price_eur, o.total_duration_minutes or 9999))
+                # Select top candidates from each category (up to 10 each) and sort by price
+                selected = sorted(
+                    offs_0_stop[:10] + offs_1_stop[:10],
+                    key=lambda o: (o.price_eur, o.stops_count, o.total_duration_minutes or 9999)
                 )
+                candidates_list.append(selected)
 
             best_combo = None
             best_price = float("inf")
@@ -446,10 +464,8 @@ class RouteCombinator:
                     if combo_price < best_price:
                         best_price = combo_price
                         best_combo = list(combo)
-                        # Break early if 0 transfer stops found (optimal for both comfort and price)
-                        if transfer_stops == 0:
-                            break
 
+            direction_cache[cache_key] = best_combo
             return best_combo
 
         for bp in blueprints:

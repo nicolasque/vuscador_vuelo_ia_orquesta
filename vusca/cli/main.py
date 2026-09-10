@@ -44,6 +44,9 @@ def create_progress_logger(progress: Progress, p_task, title: str = "Consultando
         if task_item.status == "CACHED":
             tag = "[bold blue]💾 BD LOCAL[/bold blue]"
             detail = f"[blue]{task_item.results_count} ofertas[/blue]{price_info}"
+        elif task_item.status == "NOT_IN_CACHE":
+            tag = "[dim yellow]⚡ SIN CACHÉ[/dim yellow]"
+            detail = "[dim]Omitido (--cache-only)[/dim]"
         elif task_item.status == "SUCCESS":
             provider_label = task_item.provider_name or "API"
             tag = f"[bold green]🌐 API {provider_label}[/bold green]"
@@ -94,12 +97,14 @@ def run_search_flow(
     outbound_stopovers: Optional[List[str]] = None,
     return_stopovers: Optional[List[str]] = None,
     include_dual_stopovers: bool = False,
+    allowed_scenarios: Optional[List[Tuple[str, str]]] = None,
     priority: str = "balanced",
     top_k_windows: int = 4,
     max_scales: int = 2,
     max_stops_per_leg: int = 1,
     date_flexibility: int = 0,
     dry_run: bool = False,
+    cache_only: bool = False,
     output_file: Optional[str] = None,
 ):
     print_banner()
@@ -331,6 +336,9 @@ def run_search_flow(
         "LIS": "Lisboa", "MIA": "Miami", "CMN": "Casablanca",
         "GRU": "São Paulo", "GIG": "Río de Janeiro", "SSA": "Salvador de Bahía",
         "PEN": "Penang", "SGN": "Ho Chi Minh", "HAN": "Hanói", "DPS": "Bali", "CAI": "El Cairo",
+        "FRA": "Frankfurt", "MUC": "Múnich", "CDG": "París", "AMS": "Ámsterdam",
+        "ZRH": "Zúrich", "HEL": "Helsinki", "LHR": "Londres", "VIE": "Viena",
+        "BRU": "Bruselas", "MXP": "Milán",
     }
     for k, v in known_names.items():
         if k not in stopover_names:
@@ -349,6 +357,7 @@ def run_search_flow(
             stopover_names=stopover_names,
             return_destinations=ret_dest_list,
             return_arrivals=effective_return_arrivals,
+            allowed_scenarios=allowed_scenarios,
             min_stopover_days=min_stopover_days,
             max_stopover_days=max_stopover_days,
             include_dual_stopovers=include_dual_stopovers,
@@ -431,13 +440,17 @@ def run_search_flow(
             progress_callback=on_progress,
             max_scales_per_direction=max_scales,
             max_stops_per_leg=max_stops_per_leg,
+            cache_only=cache_only,
         )
 
     cached_count = sum(1 for t in search_job.tasks if t.status == "CACHED")
     api_count = sum(1 for t in search_job.tasks if t.status == "SUCCESS")
     failed_count = sum(1 for t in search_job.tasks if t.status == "FAILED")
+    skipped_count = sum(1 for t in search_job.tasks if t.status == "NOT_IN_CACHE")
     total_offers = sum(t.results_count for t in search_job.tasks)
     summary_parts = [f"[bold blue]💾 {cached_count} en BD local[/bold blue]", f"[bold green]🌐 {api_count} vía API[/bold green]"]
+    if skipped_count:
+        summary_parts.append(f"[dim yellow]⚡ {skipped_count} sin caché local (modo offline)[/dim yellow]")
     if failed_count:
         summary_parts.append(f"[bold red]❌ {failed_count} fallidas[/bold red]")
     console.print(
@@ -463,6 +476,7 @@ def run_search_flow(
             "destinations": destinations_list,
             "return_destinations": ret_dest_list,
             "return_arrivals": effective_return_arrivals,
+            "allowed_scenarios": allowed_scenarios,
             "mix_origins": mix_origins,
             "candidate_windows": candidate_windows,
             "optimal_windows": optimal_windows,
@@ -821,9 +835,25 @@ def cli_entrypoint():
         help="Aeropuertos de regreso en país de origen separados por coma (ej. MAD,BIO)",
     )
     search_parser.add_argument(
+        "--allowed-scenarios",
+        "-as",
+        help="Pares de (origen-regreso) permitidos separados por coma (ej. BIO-BIO,MAD-MAD,MAD-BIO)",
+    )
+    search_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Simular combinatoria, estimar tareas atómicas y coste de llamadas a API sin conectar a la red",
+    )
+    search_parser.add_argument(
+        "--preset",
+        choices=list(config.SEARCH_PRESETS.keys()),
+        help="Perfil preconfigurado de búsqueda integral (ej. bilbao_europe_japan, japan_super_ampliada)",
+    )
+    search_parser.add_argument(
+        "--cache-only",
+        "--offline",
+        action="store_true",
+        help="Modo sin conexión: ensamblar y analizar únicamente a partir de la base de datos local (sin peticiones a la API)",
     )
     search_parser.add_argument("--output", "-out", help="Ruta donde guardar el informe Markdown")
 
@@ -841,16 +871,18 @@ def cli_entrypoint():
     args = parser.parse_args()
 
     if args.command == "search":
+        preset_cfg = config.SEARCH_PRESETS.get(args.preset, {}) if getattr(args, "preset", None) else {}
+
         origins_input = (
             [x.strip().upper() for x in args.origins.split(",") if x.strip()]
             if getattr(args, "origins", None)
-            else ([x.strip().upper() for x in args.origin.split(",") if x.strip()] if getattr(args, "origin", None) else None)
+            else ([x.strip().upper() for x in args.origin.split(",") if x.strip()] if getattr(args, "origin", None) else preset_cfg.get("origins"))
         )
 
         destinations_input = (
             [x.strip().upper() for x in args.destinations.split(",") if x.strip()]
             if getattr(args, "destinations", None)
-            else ([x.strip().upper() for x in args.destination.split(",") if x.strip()] if getattr(args, "destination", None) else None)
+            else ([x.strip().upper() for x in args.destination.split(",") if x.strip()] if getattr(args, "destination", None) else preset_cfg.get("destinations"))
         )
 
         if not origins_input or not destinations_input:
@@ -859,30 +891,30 @@ def cli_entrypoint():
             ret_dests = (
                 [x.strip().upper() for x in args.return_destinations.split(",") if x.strip()]
                 if getattr(args, "return_destinations", None)
-                else None
+                else preset_cfg.get("return_destinations")
             )
 
             stopovers_list = (
                 [x.strip().upper() for x in args.stopovers.split(",") if x.strip()]
                 if getattr(args, "stopovers", None)
-                else None
+                else preset_cfg.get("stopovers")
             )
 
             outbound_stopovers_list = (
                 [x.strip().upper() for x in args.outbound_stopovers.split(",") if x.strip()]
                 if getattr(args, "outbound_stopovers", None)
-                else None
+                else preset_cfg.get("outbound_stopovers")
             )
 
             return_stopovers_list = (
                 [x.strip().upper() for x in args.return_stopovers.split(",") if x.strip()]
                 if getattr(args, "return_stopovers", None)
-                else None
+                else preset_cfg.get("return_stopovers")
             )
 
-            min_days = args.min_trip_days
-            max_days = args.max_trip_days
-            max_pto = args.days_pto
+            min_days = args.min_trip_days if args.min_trip_days != 5 else preset_cfg.get("min_trip_days", 5)
+            max_days = args.max_trip_days if args.max_trip_days != 25 else preset_cfg.get("max_trip_days", 25)
+            max_pto = args.days_pto if args.days_pto != 5 else preset_cfg.get("days_pto", 5)
 
             if getattr(args, "trip_days", None):
                 min_days = args.trip_days
@@ -895,9 +927,19 @@ def cli_entrypoint():
             ret_arrivals = (
                 [x.strip().upper() for x in args.return_arrivals.split(",") if x.strip()]
                 if getattr(args, "return_arrivals", None)
+                else preset_cfg.get("return_arrivals")
+            )
+            allowed_scenarios_input = (
+                [tuple(x.strip().upper().split("-")) for x in args.allowed_scenarios.split(",") if "-" in x]
+                if getattr(args, "allowed_scenarios", None)
                 else None
             )
-            mix_origins_flag = getattr(args, "mix_origins", False)
+            mix_origins_flag = getattr(args, "mix_origins", False) or preset_cfg.get("mix_origins", False)
+            event_val = getattr(args, "event", None) or preset_cfg.get("event")
+            year_val = getattr(args, "year", None) or preset_cfg.get("year")
+            flexibility_val = args.date_flexibility if args.date_flexibility != 0 else preset_cfg.get("date_flexibility", 0)
+            subdiv_val = args.subdiv if args.subdiv != "MD" else preset_cfg.get("subdivision", "MD")
+            priority_val = getattr(args, "priority", "balanced") if args.priority != "balanced" else preset_cfg.get("priority", "balanced")
 
             run_search_flow(
                 origins=origins_input,
@@ -906,15 +948,16 @@ def cli_entrypoint():
                 destination=destinations_input[0],
                 max_pto_days=max_pto,
                 month_str=args.month,
-                year=getattr(args, "year", None),
+                year=year_val,
                 start_date_str=getattr(args, "start_date", None),
                 end_date_str=getattr(args, "end_date", None),
-                event=getattr(args, "event", None),
-                priority=getattr(args, "priority", "balanced"),
-                include_dual_stopovers=getattr(args, "dual_stopovers", False),
-                top_k_windows=getattr(args, "top_k_windows", 4),
+                event=event_val,
+                priority=priority_val,
+                include_dual_stopovers=getattr(args, "dual_stopovers", False) or preset_cfg.get("include_dual_stopovers", False),
+                allowed_scenarios=allowed_scenarios_input,
+                top_k_windows=getattr(args, "top_k_windows", 4) or preset_cfg.get("top_k_windows", 4),
                 country=args.country,
-                subdivision=args.subdiv,
+                subdivision=subdiv_val,
                 provider_name=args.provider,
                 return_destinations=ret_dests,
                 return_arrivals=ret_arrivals,
@@ -929,8 +972,9 @@ def cli_entrypoint():
                 return_stopovers=return_stopovers_list,
                 max_scales=getattr(args, "max_scales", 2),
                 max_stops_per_leg=getattr(args, "max_stops_per_leg", 1),
-                date_flexibility=args.date_flexibility,
+                date_flexibility=flexibility_val,
                 dry_run=args.dry_run,
+                cache_only=getattr(args, "cache_only", False),
                 output_file=args.output,
             )
     elif args.command == "resume":
